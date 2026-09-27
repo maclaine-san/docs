@@ -1,18 +1,18 @@
 # Troupe
 
-Hire a team of Claude agents, give each one a role and responsibilities, and let them message each other, delegate tasks and report back to you. Troupe is a macOS app that runs on your **Claude Pro/Max subscription** through the official Claude Code CLI. It doesn't use an API key.
+A simple chat app for macOS where a few AI agents with their own personalities work together. Pick **Group** and the lead agent answers, pulling in teammates when they'd help. Pick one agent's tab to talk to them directly, or `@mention` anyone.
 
-![Chat](docs/chat.png)
+It runs on your **Claude Pro/Max subscription** through the official Claude Code CLI, with no API key, and it's built to be light on usage.
 
-| Org chart | Task board | Live activity |
+![Group chat](docs/chat.png)
+
+| New chat | @mentions | Usage controls |
 |---|---|---|
-| ![](docs/team.png) | ![](docs/tasks.png) | ![](docs/activity.png) |
-
-See [PLAN.md](PLAN.md) for the design and roadmap.
+| ![](docs/new-chat.png) | ![](docs/mention.png) | ![](docs/settings.png) |
 
 ## Requirements
 
-- macOS (also runs on Linux; Windows is untested)
+- macOS (also runs on Linux)
 - Node.js 20+
 - [Claude Code](https://docs.claude.com/en/docs/claude-code) installed and logged in with your subscription:
   ```sh
@@ -26,54 +26,53 @@ See [PLAN.md](PLAN.md) for the design and roadmap.
 cd troupe
 npm install
 npm run dev          # build + launch
+npm run dist:mac     # optional: unsigned .dmg/.app in release/
 ```
 
-To build a `.dmg` / `.app`:
+## How it works
 
-```sh
-npm run dist:mac     # output in release/ via electron-builder (unsigned)
-```
+- **Tabs at the top** decide who your message goes to:
+  - **Group:** the lead (Nova by default) replies, and `@mentions` teammates when their skills help.
+  - **An agent's tab:** only that agent replies.
+  - **`@Name` in any message:** those agents reply, whatever tab is selected.
+- **Agents talk in the same thread.** When the lead writes "@Scout find X. @Quill draft Y", both work, and the lead waits until *both* have answered before writing one combined reply.
+- **Chats are separate**, as in ChatGPT: a new chat (⌘N) starts every agent with a fresh, small context. The chat history is in the sidebar.
+- **Starter team:** Nova (lead, Sonnet), Scout (web research, Haiku), Quill (writer, Haiku). Add, edit or remove agents with **+**, or click the selected tab (or right-click any tab) to edit that agent.
+- **Each agent has:** an emoji, a name, a "who are they?" description, a model, and what they can use. Options are just chat, web search, files in a workspace folder, or everything.
 
-## Using it
+## Staying light on usage
 
-1. **Hire** a *Chief of Staff* first, then specialists (Engineer, Researcher, Writer, Reviewer…) who **report to** them.
-2. **DM** the Chief of Staff with a goal. They break it into tasks, delegate with `create_task`, and message you when it's done.
-3. Watch the work happen: **Activity** shows each agent's tool calls live, **Backchannel** shows their private DMs, and **Tasks** is the shared board.
-4. Use **#general** or your own channels for group work. A message from you wakes everyone in the channel. Agents only wake teammates they `@mention`.
+All agents share your subscription's limits, so Troupe is built to use as little as possible:
 
-### Controls that protect your usage limits
+| | |
+|---|---|
+| **Lean mode** (on by default) | Replaces Claude Code's ~4k-token system prompt with a short one, and skips skills, settings files and MCP servers. A chat-only turn drops from about **4,050 to about 900 input tokens**. |
+| **Fresh context per chat** | A new chat means small sessions. Within a chat, each turn only sends messages the agent hasn't seen yet (at most 12, each capped). |
+| **Only the lead answers the group** | The other agents run only when they're `@mentioned`. No acknowledgements or "thanks" messages. |
+| **Cheap models for helpers** | Helpers default to Haiku. Only the lead uses Sonnet. |
+| **No tool overhead** | Chat-only agents load no tools at all, and teammates are coordinated through plain `@mentions`, not tool calls. |
+| **Guards** | 2 agents at a time, 6 agent-to-agent hops per message from you, 150 turns/day, and an auto-pause at 80% of your 5-hour window, which resumes when it resets. All adjustable in Settings. |
+| **Stop button** | Stops everything in the chat immediately. |
 
-- **Agents working at once** (default 2): all agents share your subscription's limits.
-- **Loop limit** (default 8 hops): stops agents messaging each other indefinitely.
-- **Pause team**, **Stop** on a running agent, and **Pause** per agent.
-- When a turn fails (e.g. a usage limit), the agent is **put on hold** with its messages kept. Press **Resume** when you're ready.
-- **Heartbeat** is off by default. Turn it on per agent to have them check their tasks on a schedule.
-
-### Permissions
-
-Each agent has a preset: **Chat only** (no file or web access), **Research** (web and read files), **Builder** (edit files, a few safe shell commands), or **Full autonomy** (skips all permission checks; only use it in a throwaway folder). By default agents work in a shared workspace folder that you can change in Settings, or you can give an agent its own directory.
+The sidebar shows your 5-hour usage (as reported by Claude Code) and today's turn count.
 
 ## Development
 
 ```sh
 npm run typecheck
 npm test             # orchestrator unit tests (fake Claude runner)
-npm run e2e          # real end-to-end run with two agents on Haiku (uses a little of your usage)
+npm run e2e          # real run: you → Nova → Quill → Nova on Haiku (≈$0.01 API-equivalent)
 ```
 
-Layout:
-
 ```
-src/core/orchestrator.ts   routing, inbox, scheduler, loop guard, agent tools
-src/core/claudeRunner.ts   spawns `claude -p`, parses stream-json, PATH discovery
-src/core/bridge.ts         localhost endpoint the MCP server calls
-src/core/prompts.ts        system prompt + per-turn wake-up prompt
-src/mcp/server.ts          stdio MCP server each agent loads (mcp__troupe__*)
+src/core/orchestrator.ts   chats, routing by @mention, waiting for answers, scheduling, usage guards
+src/core/claudeRunner.ts   runs `claude -p` (lean flags), parses stream-json and usage events
+src/core/prompts.ts        short system prompt + "what's new since your last turn" prompt
 src/main/                  Electron main + preload
 src/renderer/              React UI
 ```
 
-App data lives in `~/Library/Application Support/Troupe/state.json`. Each agent's conversation history is a normal Claude Code session.
+App data lives in `~/Library/Application Support/Troupe/state.json`. Each agent-in-a-chat is a normal Claude Code session.
 
 ## A note on terms
 

@@ -13,7 +13,6 @@ if (tests) {
   await Promise.all([
     esbuild.build({ ...node, entryPoints: ['src/main/main.ts'], outfile: 'dist/main.js', external: ['electron'] }),
     esbuild.build({ ...node, entryPoints: ['src/main/preload.ts'], outfile: 'dist/preload.js', external: ['electron'] }),
-    esbuild.build({ ...node, entryPoints: ['src/mcp/server.ts'], outfile: 'dist/mcp.js' }),
     esbuild.build({ ...node, entryPoints: ['src/e2e.ts'], outfile: 'dist/e2e.js' }),
     esbuild.build({
       ...common,

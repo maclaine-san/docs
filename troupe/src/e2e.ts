@@ -1,4 +1,4 @@
-// Headless end-to-end run against the real claude CLI (uses your subscription).
+// Headless end-to-end run against the real claude CLI (uses a little of your subscription).
 //   npm run e2e
 import fs from 'node:fs';
 import os from 'node:os';
@@ -6,8 +6,6 @@ import path from 'node:path';
 import { Store } from './core/store';
 import { Orchestrator } from './core/orchestrator';
 import { ClaudeCliRunner, childEnv, findClaude, loginShellPath } from './core/claudeRunner';
-import { startBridge } from './core/bridge';
-import { displayName, channelLabel } from './core/prompts';
 import { USER_ID } from './shared/types';
 
 async function main() {
@@ -19,47 +17,37 @@ async function main() {
   const orch = new Orchestrator(store, new ClaudeCliRunner(), {
     claudePath,
     childEnv: () => childEnv(pathVar, store.state.settings.forceSubscription),
-    mcpCommand: process.execPath,
-    mcpArgs: [path.join(__dirname, 'mcp.js')],
-    mcpEnv: {},
   });
-  const bridge = await startBridge(orch);
-  orch.start(bridge.url);
-  orch.updateSettings({ defaultModel: process.env.TROUPE_MODEL ?? 'haiku' });
-  orch.on('activity', (e) => {
-    const who = orch.state.agents.find((a) => a.id === e.agentId)?.name;
-    console.log(`  · ${who} ${e.kind}: ${e.text.replace(/\s+/g, ' ').slice(0, 160)}`);
-  });
+  orch.start();
+  const base = { emoji: '●', hue: 0, model: 'haiku', capability: 'chat' as const };
+  orch.addAgent({ ...base, name: 'Nova', isLead: true, persona: 'Team lead. Delegates writing to Quill.' });
+  orch.addAgent({ ...base, name: 'Quill', isLead: false, persona: 'Poet who writes very short poems.' });
+  orch.on('live', (l) => l.length && console.log('  ·', l.map((x: any) => orch.state.agents.find((a) => a.id === x.agentId)?.name + (x.step ? ` (${x.step})` : '')).join(', ')));
 
-  const base = { instructions: '', model: '', tools: 'chat' as const, useMyMcpServers: false, cwd: '', heartbeatMinutes: 0 };
-  const maya = orch.hireAgent({ ...base, name: 'Maya', role: 'Project Manager', responsibilities: 'Break requests from the user into tasks, delegate them to the right teammate, and report results back to the user.', reportsTo: '' });
-  orch.hireAgent({ ...base, name: 'Leo', role: 'Copywriter', responsibilities: 'Write short, vivid copy and poems on request.', reportsTo: maya.id });
-
-  const dm = orch.dm(USER_ID, maya.id);
-  orch.userMessage(dm.id, 'Please have Leo write a two-line poem about the ocean via a task, then send me the poem once he is done.');
+  const chat = orch.newChat('group');
+  orch.userMessage(chat.id, 'Ask Quill for a two-line poem about the ocean, then give it to me with a one-line comment of your own.');
 
   const started = Date.now();
-  await new Promise<void>((resolve, reject) => {
-    const t = setInterval(() => {
-      const busy = orch.state.agents.some((a) => orch.isRunning(a.id)) || orch.state.inbox.length > 0;
-      if (!busy) { clearInterval(t); resolve(); }
-      if (Date.now() - started > 8 * 60_000) { clearInterval(t); reject(new Error('timeout')); }
-    }, 1000);
-  });
-
-  console.log('\n=== Transcript ===');
-  for (const m of orch.state.messages) {
-    console.log(`[${channelLabel(orch.state, m.channelId, USER_ID)}] ${displayName(orch.state, m.from)} (depth ${m.depth}): ${m.text}\n`);
+  while (orch.isBusy() || orch.state.inbox.length) {
+    if (Date.now() - started > 5 * 60_000) throw new Error('timeout');
+    await new Promise((r) => setTimeout(r, 500));
   }
-  console.log('=== Tasks ===');
-  for (const t of orch.state.tasks) console.log(`${t.id} [${t.status}] ${t.title} -> ${t.result}`);
-  const errs = orch.state.agents.filter((a) => a.status === 'error');
+
+  console.log('\n=== Chat ===');
+  for (const m of orch.state.messages) {
+    const who = m.from === USER_ID ? 'You' : orch.state.agents.find((a) => a.id === m.from)?.name ?? m.from;
+    console.log(`${who}: ${m.text}\n`);
+  }
+  const names = orch.state.messages.map((m) => orch.state.agents.find((a) => a.id === m.from)?.name ?? m.from);
+  const cost = orch.state.agents.reduce((s, a) => s + a.costUsd, 0);
+  console.log(`Turns: ${orch.state.usage.turnsToday}, API-equivalent cost: $${cost.toFixed(4)}, 5h usage: ${orch.state.usage.fiveHour?.utilization ?? 'n/a'}`);
   orch.shutdown();
-  bridge.close();
-  const replied = orch.state.messages.some((m) => m.channelId === dm.id && m.from === maya.id);
-  const done = orch.state.tasks.some((t) => t.status === 'done');
-  console.log(`\nMaya replied to user: ${replied}; a task was completed: ${done}; errors: ${errs.map((a) => a.lastError).join(' | ') || 'none'}`);
-  process.exit(replied && done && !errs.length ? 0 : 1);
+  const ok = names.join(',') === 'user,Nova,Quill,Nova';
+  console.log(ok ? 'PASS' : `FAIL: unexpected flow ${names.join(' → ')}`);
+  process.exit(ok ? 0 : 1);
 }
 
-main().catch((e) => { console.error(e); process.exit(1); });
+main().catch((e) => {
+  console.error(e);
+  process.exit(1);
+});

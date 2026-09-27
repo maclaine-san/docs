@@ -1,96 +1,36 @@
 import type { AgentDraft } from '../shared/types';
 
-export interface Template {
-  key: string;
-  label: string;
-  blurb: string;
-  draft: Omit<AgentDraft, 'name' | 'reportsTo' | 'cwd'>;
-}
+export const EMOJIS = ['✦', '🔎', '✍️', '💻', '🧠', '🎨', '📈', '🧪', '🗂️', '⚖️', '🎯', '🦉', '🐙', '🌱', '⚡', '🎧'];
 
-const base = { instructions: '', useMyMcpServers: false, heartbeatMinutes: 0 };
-
-export const TEMPLATES: Template[] = [
+export const PRESETS: { label: string; draft: AgentDraft }[] = [
   {
-    key: 'lead',
-    label: 'Chief of Staff',
-    blurb: 'Turns your goals into plans and runs the team.',
-    draft: {
-      ...base,
-      role: 'Chief of Staff',
-      model: 'opus',
-      tools: 'chat',
-      responsibilities:
-        'Own the goals the user gives you. Break them into concrete tasks, delegate each to the teammate who owns that area, track progress on the task board, unblock people, and send the user a concise summary when a goal is done or needs a decision. Do not do specialist work yourself when a teammate owns it.',
-    },
-  },
-  {
-    key: 'pm',
-    label: 'Product Manager',
-    blurb: 'Specs, priorities, acceptance criteria.',
-    draft: {
-      ...base,
-      role: 'Product Manager',
-      model: 'sonnet',
-      tools: 'research',
-      responsibilities:
-        'Turn ideas into clear specs with user stories and acceptance criteria. Prioritise ruthlessly. Hand build work to engineering and review what comes back against the spec.',
-    },
-  },
-  {
-    key: 'eng',
-    label: 'Engineer',
-    blurb: 'Writes and edits code in the workspace.',
-    draft: {
-      ...base,
-      role: 'Software Engineer',
-      model: 'sonnet',
-      tools: 'builder',
-      responsibilities:
-        'Implement features and fixes in the shared workspace. Keep changes small and tested. Report what you changed, where, and how to run it. Ask the PM when requirements are unclear.',
-    },
-  },
-  {
-    key: 'research',
     label: 'Researcher',
-    blurb: 'Searches the web and reads files.',
-    draft: {
-      ...base,
-      role: 'Research Analyst',
-      model: 'sonnet',
-      tools: 'research',
-      responsibilities:
-        'Research questions from the team using the web and files in the workspace. Deliver a short answer first, then evidence with sources. Flag uncertainty honestly.',
-    },
+    draft: { name: 'Scout', emoji: '🔎', hue: 150, model: 'haiku', capability: 'web', isLead: false, persona: 'Researcher who searches the web and returns a short answer first, then key facts with sources.' },
   },
   {
-    key: 'writer',
     label: 'Writer',
-    blurb: 'Copy, docs, posts, emails.',
-    draft: {
-      ...base,
-      role: 'Content Writer',
-      model: 'sonnet',
-      tools: 'chat',
-      responsibilities: 'Write clear, on-brand copy: landing pages, docs, social posts, emails. Offer one strong draft, not five weak ones.',
-    },
+    draft: { name: 'Quill', emoji: '✍️', hue: 20, model: 'haiku', capability: 'chat', isLead: false, persona: 'Writer who turns ideas into clear, punchy copy: one strong draft, never five weak ones.' },
   },
   {
-    key: 'qa',
-    label: 'Reviewer',
-    blurb: 'Critiques work before it ships.',
-    draft: {
-      ...base,
-      role: 'QA Reviewer',
-      model: 'sonnet',
-      tools: 'research',
-      responsibilities:
-        'Review deliverables from teammates for correctness, quality and fit to the request. Be specific: list the problems in priority order and what would fix them. Approve explicitly when good.',
-    },
+    label: 'Coder',
+    draft: { name: 'Byte', emoji: '💻', hue: 200, model: 'sonnet', capability: 'files', isLead: false, persona: 'Pragmatic software engineer. Writes small, working code in the workspace folder and explains how to run it.' },
   },
   {
-    key: 'custom',
+    label: 'Critic',
+    draft: { name: 'Sage', emoji: '⚖️', hue: 0, model: 'haiku', capability: 'chat', isLead: false, persona: 'Honest reviewer. Points out the 2-3 most important problems in a draft and how to fix them. Says so plainly when something is good.' },
+  },
+  {
+    label: 'Planner',
+    draft: { name: 'Atlas', emoji: '🗂️', hue: 45, model: 'haiku', capability: 'chat', isLead: false, persona: 'Planner who turns fuzzy goals into short, ordered action plans with owners and next steps.' },
+  },
+  {
     label: 'Custom',
-    blurb: 'Start from a blank profile.',
-    draft: { ...base, role: '', model: '', tools: 'chat', responsibilities: '' },
+    draft: { name: '', emoji: '🦉', hue: 300, model: 'haiku', capability: 'chat', isLead: false, persona: '' },
   },
+];
+
+export const SUGGESTIONS = [
+  'Research the top 3 competitors for a habit-tracking app and draft a one-line pitch that beats them',
+  'Plan a 3-day trip to Kyoto on a budget, then write it up as a friendly itinerary',
+  'Give me 5 names for a coffee subscription brand and have them critiqued',
 ];

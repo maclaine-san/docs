@@ -5,28 +5,28 @@ import os from 'node:os';
 import path from 'node:path';
 import { Store } from '../src/core/store';
 import { Orchestrator } from '../src/core/orchestrator';
-import { buildArgs, parseStreamLine, type Runner, type TurnRequest, type TurnResult } from '../src/core/claudeRunner';
+import { buildArgs, parseStreamLine, type Runner, type TurnCallbacks, type TurnRequest, type TurnResult } from '../src/core/claudeRunner';
 import type { AgentDraft } from '../src/shared/types';
-import { USER_ID, SYSTEM_ID } from '../src/shared/types';
+import { SYSTEM_ID, USER_ID } from '../src/shared/types';
 
-type Script = (req: TurnRequest, agentName: string) => Promise<TurnResult> | TurnResult;
+type Script = (req: TurnRequest, agentName: string, cb: TurnCallbacks) => Promise<TurnResult> | TurnResult;
 
-/** A runner that doesn't call Claude: each turn runs `script`, which can call tools. */
+/** A runner that doesn't call Claude: each turn's reply comes from `script`. */
 class FakeRunner implements Runner {
   calls: { req: TurnRequest; agent: string }[] = [];
   active = 0;
   maxActive = 0;
   orch!: Orchestrator;
   constructor(public script: Script) {}
-  run(req: TurnRequest) {
-    const agent = this.orch.state.agents.find((a) => a.sessionId === req.sessionId)!;
+  run(req: TurnRequest, cb: TurnCallbacks) {
+    const agent = this.orch.state.agents.find((a) => req.systemPrompt.startsWith(`You are ${a.name}.`))!;
     this.calls.push({ req, agent: agent.name });
     this.active++;
     this.maxActive = Math.max(this.maxActive, this.active);
     const done = (async () => {
       await new Promise((r) => setTimeout(r, 5));
       try {
-        return await this.script(req, agent.name);
+        return await this.script(req, agent.name, cb);
       } finally {
         this.active--;
       }
@@ -37,117 +37,130 @@ class FakeRunner implements Runner {
 
 function setup(script: Script) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'troupe-test-'));
-  const store = new Store(dir);
   const runner = new FakeRunner(script);
-  const orch = new Orchestrator(store, runner, {
-    claudePath: '/bin/false',
-    childEnv: () => ({}),
-    mcpCommand: 'node',
-    mcpArgs: ['mcp.js'],
-    mcpEnv: {},
-  });
+  const orch = new Orchestrator(new Store(dir), runner, { claudePath: '/bin/false', childEnv: () => ({}) });
   runner.orch = orch;
-  orch.start('http://127.0.0.1:0');
+  orch.start();
   return { orch, runner };
 }
 
 const draft = (name: string, extra: Partial<AgentDraft> = {}): AgentDraft => ({
   name,
-  role: `${name} role`,
-  responsibilities: '',
-  instructions: '',
+  emoji: '●',
+  hue: 0,
+  persona: `${name} persona`,
   model: 'haiku',
-  reportsTo: '',
-  tools: 'chat',
-  useMyMcpServers: false,
-  cwd: '',
-  heartbeatMinutes: 0,
+  capability: 'chat',
+  isLead: false,
   ...extra,
 });
 
 async function idle(orch: Orchestrator) {
   for (let i = 0; i < 400; i++) {
-    const busy = orch.state.agents.some((a) => orch.isRunning(a.id)) || orch.state.inbox.some((x) => orch.state.agents.find((a) => a.id === x.agentId)?.status !== 'error');
-    if (!busy) return;
+    if (!orch.isBusy() && (!orch.state.inbox.length || orch.state.settings.paused)) return;
     await new Promise((r) => setTimeout(r, 5));
   }
-  throw new Error('orchestrator never went idle');
+  throw new Error('never went idle');
 }
 
-const ok = (text: string): TurnResult => ({ ok: true, text, costUsd: 0.01 });
+const ok = (text: string): TurnResult => ({ ok: true, text, costUsd: 0.001 });
+const texts = (orch: Orchestrator, chatId: string) =>
+  orch.state.messages.filter((m) => m.chatId === chatId).map((m) => `${orch.state.agents.find((a) => a.id === m.from)?.name ?? m.from}: ${m.text}`);
 
-test('a DM from the user wakes the agent and the reply is posted back', async () => {
-  const { orch, runner } = setup(() => ok('hello boss'));
-  const a = orch.hireAgent(draft('Maya'));
-  const dm = orch.dm(USER_ID, a.id);
-  orch.userMessage(dm.id, 'hi');
+test('group messages go to the lead only, and the reply is posted in the chat', async () => {
+  const { orch, runner } = setup(() => ok('hi there'));
+  orch.addAgent(draft('Nova', { isLead: true }));
+  orch.addAgent(draft('Scout'));
+  const chat = orch.newChat('group');
+  orch.userMessage(chat.id, 'hello');
   await idle(orch);
-  assert.equal(runner.calls.length, 1);
-  assert.equal(runner.calls[0].req.resume, false);
-  assert.match(runner.calls[0].req.prompt, /hi/);
-  const msgs = orch.state.messages.filter((m) => m.channelId === dm.id);
-  assert.deepEqual(msgs.map((m) => [m.from, m.text]), [[USER_ID, 'hi'], [a.id, 'hello boss']]);
+  assert.deepEqual(runner.calls.map((c) => c.agent), ['Nova']);
+  assert.deepEqual(texts(orch, chat.id), ['user: hello', 'Nova: hi there']);
+  assert.equal(chat.title, 'hello');
+});
 
-  orch.userMessage(dm.id, 'again');
+test('picking an agent tab talks to that agent directly', async () => {
+  const { orch, runner } = setup(() => ok('scout here'));
+  orch.addAgent(draft('Nova', { isLead: true }));
+  const scout = orch.addAgent(draft('Scout'));
+  const chat = orch.newChat(scout.id);
+  orch.userMessage(chat.id, 'find stuff');
   await idle(orch);
-  assert.equal(runner.calls[1].req.resume, true, 'second turn resumes the same session');
+  assert.deepEqual(runner.calls.map((c) => c.agent), ['Scout']);
+});
+
+test('@mentions in your message wake exactly those agents', async () => {
+  const { orch, runner } = setup(() => ok('ok'));
+  orch.addAgent(draft('Nova', { isLead: true }));
+  orch.addAgent(draft('Scout'));
+  orch.addAgent(draft('Quill'));
+  const chat = orch.newChat('group');
+  orch.userMessage(chat.id, '@scout and @Quill, thoughts?');
+  await idle(orch);
+  assert.deepEqual(runner.calls.map((c) => c.agent).sort(), ['Quill', 'Scout']);
+});
+
+test('the lead waits for everyone it @mentioned, then gets all answers in one turn', async () => {
+  const { orch, runner } = setup(async (req, name) => {
+    if (name === 'Nova' && /write me a launch post/.test(req.prompt)) return ok('@Scout find 3 facts. @Quill draft a headline.');
+    if (name === 'Scout') {
+      await new Promise((r) => setTimeout(r, 30)); // slower than Quill
+      return ok('fact1 fact2 fact3');
+    }
+    if (name === 'Quill') return ok('Big Headline');
+    return ok('Final: Big Headline + facts');
+  });
+  orch.addAgent(draft('Nova', { isLead: true }));
+  orch.addAgent(draft('Scout'));
+  orch.addAgent(draft('Quill'));
+  const chat = orch.newChat('group');
+  orch.userMessage(chat.id, 'write me a launch post');
+  await idle(orch);
+  assert.deepEqual(runner.calls.map((c) => c.agent), ['Nova', 'Scout', 'Quill', 'Nova']);
+  const final = runner.calls[3].req.prompt;
+  assert.match(final, /Scout: fact1/);
+  assert.match(final, /Quill: Big Headline/);
+  assert.match(final, /Scout and Quill are waiting|Quill and Scout are waiting/);
+  assert.equal(texts(orch, chat.id).at(-1), 'Nova: Final: Big Headline + facts');
+});
+
+test('each turn only sends messages the agent has not seen yet', async () => {
+  const { orch, runner } = setup(() => ok('noted'));
+  orch.addAgent(draft('Nova', { isLead: true }));
+  const chat = orch.newChat('group');
+  orch.userMessage(chat.id, 'first message');
+  await idle(orch);
+  orch.userMessage(chat.id, 'second message');
+  await idle(orch);
+  assert.equal(runner.calls[1].req.resume, true);
   assert.equal(runner.calls[1].req.sessionId, runner.calls[0].req.sessionId);
+  assert.match(runner.calls[1].req.prompt, /second message/);
+  assert.doesNotMatch(runner.calls[1].req.prompt, /first message/);
 });
 
-test('channel routing: humans wake everyone, agents only wake who they @mention', async () => {
-  const { orch, runner } = setup(async (req, name) => {
-    if (name === 'Maya' && /kickoff/.test(req.prompt)) {
-      const maya = orch.state.agents.find((a) => a.name === 'Maya')!;
-      await orch.handleTool(maya.id, 'send_message', { to: '#general', text: 'thinking out loud' });
-      await orch.handleTool(maya.id, 'send_message', { to: '#general', text: '@Leo please draft it' });
-    }
-    return ok('');
-  });
-  orch.hireAgent(draft('Maya'));
-  orch.hireAgent(draft('Leo'));
-  orch.hireAgent(draft('Ana'));
-  const general = orch.state.channels.find((c) => c.name === 'general')!;
-  orch.userMessage(general.id, 'kickoff');
+test('a new chat starts a fresh session for the same agent', async () => {
+  const { orch, runner } = setup(() => ok('hi'));
+  orch.addAgent(draft('Nova', { isLead: true }));
+  const a = orch.newChat('group');
+  orch.userMessage(a.id, 'one');
   await idle(orch);
-  const woke = runner.calls.map((c) => c.agent);
-  assert.deepEqual(woke.slice(0, 3).sort(), ['Ana', 'Leo', 'Maya']);
-  // Only Leo is woken by Maya's @mention; "thinking out loud" wakes nobody.
-  assert.deepEqual(woke.slice(3), ['Leo']);
-});
-
-test('tasks notify the assignee, and completion notifies the creator', async () => {
-  const { orch, runner } = setup(async (req, name) => {
-    const me = orch.state.agents.find((a) => a.name === name)!;
-    if (name === 'Maya' && /ship it/.test(req.prompt)) {
-      await orch.handleTool(me.id, 'create_task', { title: 'Write copy', description: 'hero text', assignee: 'Leo' });
-    }
-    if (name === 'Leo' && /New task T-1/.test(req.prompt)) {
-      await orch.handleTool(me.id, 'update_task', { task_id: 'T-1', status: 'done', result: 'Buy now' });
-    }
-    return ok('');
-  });
-  const maya = orch.hireAgent(draft('Maya'));
-  orch.hireAgent(draft('Leo', { reportsTo: maya.id }));
-  orch.userMessage(orch.dm(USER_ID, maya.id).id, 'ship it');
+  const b = orch.newChat('group');
+  assert.notEqual(a.id, b.id);
+  orch.userMessage(b.id, 'two');
   await idle(orch);
-  assert.deepEqual(runner.calls.map((c) => c.agent), ['Maya', 'Leo', 'Maya']);
-  assert.match(runner.calls[2].req.prompt, /T-1 "Write copy" is done/);
-  assert.equal(orch.state.tasks[0].status, 'done');
-  assert.equal(orch.state.tasks[0].result, 'Buy now');
+  assert.notEqual(runner.calls[0].req.sessionId, runner.calls[1].req.sessionId);
+  assert.equal(runner.calls[1].req.resume, false);
 });
 
-test('agent ping-pong stops at the loop limit', async () => {
-  const { orch, runner } = setup(async (_req, name) => {
-    const me = orch.state.agents.find((a) => a.name === name)!;
-    await orch.handleTool(me.id, 'send_message', { to: name === 'A' ? 'B' : 'A', text: 'your turn' });
-    return ok('');
-  });
+test('agent ping-pong stops at the hop limit', async () => {
+  const { orch, runner } = setup((_req, name) => ok(name === 'A' ? '@B your turn' : '@A your turn'));
   orch.updateSettings({ maxDepth: 4 });
-  const a = orch.hireAgent(draft('A'));
-  orch.hireAgent(draft('B'));
-  orch.userMessage(orch.dm(USER_ID, a.id).id, 'start');
+  orch.addAgent(draft('A', { isLead: true }));
+  orch.addAgent(draft('B'));
+  const chat = orch.newChat('group');
+  orch.userMessage(chat.id, 'go');
   await idle(orch);
-  // The user's message wakes A (turn 1), then 4 agent-to-agent hops are allowed.
+  // Your message wakes A (turn 1), then 4 agent-to-agent hops are allowed.
   assert.equal(runner.calls.length, 5);
   assert.ok(orch.state.messages.some((m) => m.from === SYSTEM_ID && /Loop limit/.test(m.text)));
 });
@@ -158,115 +171,152 @@ test('concurrency limit is respected', async () => {
     return ok('');
   });
   orch.updateSettings({ maxConcurrent: 2 });
-  for (const n of ['A', 'B', 'C', 'D', 'E']) orch.hireAgent(draft(n));
-  orch.userMessage(orch.state.channels.find((c) => c.name === 'general')!.id, 'everyone go');
+  for (const n of ['A', 'B', 'C', 'D']) orch.addAgent(draft(n));
+  const chat = orch.newChat('group');
+  orch.userMessage(chat.id, '@A @B @C @D go');
   await idle(orch);
-  assert.equal(runner.calls.length, 5);
+  assert.equal(runner.calls.length, 4);
   assert.equal(runner.maxActive, 2);
 });
 
-test('pausing the team holds work until resumed', async () => {
+test('daily turn cap pauses the team and keeps the queue', async () => {
   const { orch, runner } = setup(() => ok('done'));
-  const a = orch.hireAgent(draft('A'));
-  orch.updateSettings({ paused: true });
-  orch.userMessage(orch.dm(USER_ID, a.id).id, 'go');
-  await new Promise((r) => setTimeout(r, 30));
-  assert.equal(runner.calls.length, 0);
-  assert.equal(orch.state.agents[0].status, 'queued');
-  orch.updateSettings({ paused: false });
+  orch.updateSettings({ dailyTurnCap: 1 });
+  orch.addAgent(draft('A', { isLead: true }));
+  const chat = orch.newChat('group');
+  orch.userMessage(chat.id, 'one');
+  await idle(orch);
+  orch.userMessage(chat.id, 'two');
   await idle(orch);
   assert.equal(runner.calls.length, 1);
-});
-
-test('errors put the agent on hold without losing messages', async () => {
-  let fail = true;
-  const { orch, runner } = setup(() => (fail ? { ok: false, text: '', costUsd: 0, error: 'usage limit reached' } : ok('recovered')));
-  const a = orch.hireAgent(draft('A'));
-  const dm = orch.dm(USER_ID, a.id);
-  orch.userMessage(dm.id, 'hello');
-  await idle(orch);
-  assert.equal(orch.state.agents[0].status, 'error');
-  assert.equal(orch.state.inbox.length, 1, 'message kept for retry');
-  assert.ok(orch.state.messages.some((m) => m.from === SYSTEM_ID && /usage limit/.test(m.text)));
-  fail = false;
-  orch.updateAgent(a.id, { paused: false });
+  assert.equal(orch.state.settings.paused, true);
+  assert.equal(orch.state.settings.pauseReason, 'daily_cap');
+  assert.equal(orch.state.inbox.length, 1);
+  orch.updateSettings({ dailyTurnCap: 0, paused: false });
   await idle(orch);
   assert.equal(runner.calls.length, 2);
-  assert.equal(orch.state.messages.at(-1)!.text, 'recovered');
 });
 
-test('a lost session is replaced and the turn retried', async () => {
-  let n = 0;
-  const { orch, runner } = setup(() => (n++ === 1 ? { ok: false, text: '', costUsd: 0, error: 'No conversation found with session ID x', sessionMissing: true } : ok('fine')));
-  const a = orch.hireAgent(draft('A'));
-  const dm = orch.dm(USER_ID, a.id);
-  orch.userMessage(dm.id, 'one');
+test('high 5-hour usage pauses the team', async () => {
+  const { orch } = setup((_r, _n, cb) => {
+    cb.onUsage?.({ fiveHour: { utilization: 0.85, resetsAt: Math.floor(Date.now() / 1000) + 3600 } });
+    return ok('ok');
+  });
+  orch.addAgent(draft('A', { isLead: true }));
+  const chat = orch.newChat('group');
+  orch.userMessage(chat.id, 'hi');
   await idle(orch);
-  orch.userMessage(dm.id, 'two');
-  await idle(orch);
-  assert.equal(runner.calls.length, 3);
-  assert.equal(runner.calls[2].req.resume, false);
-  assert.notEqual(runner.calls[2].req.sessionId, runner.calls[0].req.sessionId);
-  assert.equal(orch.state.agents[0].status, 'idle');
+  assert.equal(orch.state.settings.paused, true);
+  assert.equal(orch.state.settings.pauseReason, 'usage_limit');
 });
 
-test('profile changes are briefed on the next turn', async () => {
-  const { orch, runner } = setup(() => ok('ok'));
-  const a = orch.hireAgent(draft('A'));
-  const dm = orch.dm(USER_ID, a.id);
-  orch.userMessage(dm.id, 'one');
+test('a usage-limit error keeps the message and pauses; other errors post a note', async () => {
+  let err = 'Claude usage limit reached';
+  const { orch, runner } = setup(() => (err ? { ok: false, text: '', costUsd: 0, error: err } : ok('back')));
+  orch.addAgent(draft('A', { isLead: true }));
+  const chat = orch.newChat('group');
+  orch.userMessage(chat.id, 'hi');
   await idle(orch);
-  orch.updateAgent(a.id, { role: 'Chief Poet' });
-  orch.userMessage(dm.id, 'two');
+  assert.equal(orch.state.settings.pauseReason, 'usage_limit');
+  assert.equal(orch.state.inbox.length, 1);
+  err = '';
+  orch.updateSettings({ paused: false });
   await idle(orch);
-  assert.match(runner.calls[1].req.prompt, /profile was updated[\s\S]*Chief Poet/);
-  orch.userMessage(dm.id, 'three');
-  await idle(orch);
-  assert.doesNotMatch(runner.calls[2].req.prompt, /profile was updated/);
-});
+  assert.equal(texts(orch, chat.id).at(-1), 'A: back');
 
-test('names are validated and unique', () => {
-  const { orch } = setup(() => ok(''));
-  orch.hireAgent(draft('Maya'));
-  assert.throws(() => orch.hireAgent(draft('maya')), /already/);
-  assert.throws(() => orch.hireAgent(draft('Two Words')), /letters/);
-  assert.throws(() => orch.hireAgent(draft('all')), /reserved/);
-});
-
-test('firing an agent cleans up', async () => {
-  const { orch } = setup(() => ok(''));
-  const boss = orch.hireAgent(draft('Boss'));
-  const a = orch.hireAgent(draft('A', { reportsTo: boss.id }));
-  orch.createTask(USER_ID, { title: 't', description: '', assigneeId: a.id }, 0);
-  orch.fireAgent(boss.id);
-  assert.equal(orch.state.agents.find((x) => x.id === a.id)!.reportsTo, '');
-  orch.fireAgent(a.id);
-  assert.equal(orch.state.tasks[0].assigneeId, '');
+  err = 'bad model name';
+  orch.userMessage(chat.id, 'again');
+  await idle(orch);
+  assert.match(texts(orch, chat.id).at(-1)!, /A hit an error/);
   assert.equal(orch.state.inbox.length, 0);
+  assert.equal(runner.calls.length, 3);
 });
 
-test('CLI arguments for each permission preset', () => {
+test('a failing helper does not leave the lead waiting forever', async () => {
+  const { orch, runner } = setup((req, name) => {
+    if (name === 'Scout') return { ok: false, text: '', costUsd: 0, error: 'boom' };
+    return ok(/waiting/.test(req.prompt) && runner.calls.length > 1 ? 'Scout failed, here is my best guess' : '@Scout look this up');
+  });
+  orch.addAgent(draft('Nova', { isLead: true }));
+  orch.addAgent(draft('Scout'));
+  const chat = orch.newChat('group');
+  orch.userMessage(chat.id, 'question');
+  await idle(orch);
+  assert.deepEqual(runner.calls.map((c) => c.agent), ['Nova', 'Scout', 'Nova']);
+});
+
+test('stopping a chat clears its queue and waits', async () => {
+  const { orch } = setup(async () => {
+    await new Promise((r) => setTimeout(r, 50));
+    return ok('late');
+  });
+  orch.addAgent(draft('A', { isLead: true }));
+  const chat = orch.newChat('group');
+  orch.userMessage(chat.id, 'hi');
+  await new Promise((r) => setTimeout(r, 10));
+  orch.stopChat(chat.id);
+  await new Promise((r) => setTimeout(r, 80));
+  assert.deepEqual(texts(orch, chat.id), ['user: hi']);
+  assert.equal(orch.isBusy(), false);
+});
+
+test('team changes are mentioned once in existing chats', async () => {
+  const { orch, runner } = setup(() => ok('ok'));
+  orch.addAgent(draft('A', { isLead: true }));
+  const chat = orch.newChat('group');
+  orch.userMessage(chat.id, 'one');
+  await idle(orch);
+  orch.addAgent(draft('B'));
+  orch.userMessage(chat.id, 'two');
+  await idle(orch);
+  orch.userMessage(chat.id, 'three');
+  await idle(orch);
+  assert.match(runner.calls[1].req.prompt, /Team update[\s\S]*@B/);
+  assert.doesNotMatch(runner.calls[2].req.prompt, /Team update/);
+});
+
+test('names are validated, removing the lead promotes someone else', () => {
+  const { orch } = setup(() => ok(''));
+  const a = orch.addAgent(draft('Nova'));
+  assert.equal(a.isLead, true, 'first agent becomes lead');
+  orch.addAgent(draft('Scout'));
+  assert.throws(() => orch.addAgent(draft('nova')), /already/);
+  assert.throws(() => orch.addAgent(draft('Two Words')), /one-word/);
+  assert.throws(() => orch.addAgent(draft('group')), /reserved/);
+  orch.removeAgent(a.id);
+  assert.equal(orch.state.agents[0].isLead, true);
+});
+
+test('lean mode replaces the system prompt and trims what Claude Code loads', () => {
   const base: TurnRequest = {
     claudePath: 'claude', cwd: '/tmp', env: {}, sessionId: 'sid', resume: false, systemPrompt: 'sys', prompt: 'p',
-    model: 'sonnet', tools: 'chat', useMyMcpServers: false, mcpConfig: { mcpServers: {} },
+    model: 'haiku', capability: 'chat', lean: true,
   };
-  const chat = buildArgs(base);
-  assert.deepEqual(chat.slice(0, 6), ['-p', '--output-format', 'stream-json', '--verbose', '--session-id', 'sid']);
-  assert.ok(chat.includes('--strict-mcp-config'));
-  assert.equal(chat[chat.indexOf('--tools') + 1], '');
-  assert.equal(chat[chat.indexOf('--allowedTools') + 1], 'mcp__troupe');
-  const resumed = buildArgs({ ...base, resume: true, useMyMcpServers: true });
-  assert.ok(resumed.includes('--resume') && !resumed.includes('--strict-mcp-config'));
-  assert.ok(buildArgs({ ...base, tools: 'builder' }).includes('acceptEdits'));
-  assert.ok(buildArgs({ ...base, tools: 'autonomous' }).includes('--dangerously-skip-permissions'));
+  const lean = buildArgs(base);
+  assert.equal(lean[lean.indexOf('--system-prompt') + 1], 'sys');
+  for (const f of ['--disable-slash-commands', '--strict-mcp-config', '--setting-sources']) assert.ok(lean.includes(f), f);
+  assert.equal(lean[lean.indexOf('--tools') + 1], '');
+  const full = buildArgs({ ...base, lean: false, resume: true, capability: 'web' });
+  assert.ok(full.includes('--append-system-prompt') && !full.includes('--system-prompt') && full.includes('--resume'));
+  assert.equal(full[full.indexOf('--tools') + 1], 'WebSearch,WebFetch');
+  assert.ok(buildArgs({ ...base, capability: 'full' }).includes('--dangerously-skip-permissions'));
 });
 
-test('stream-json parsing', () => {
+test('stream-json parsing: text, tools, usage and result', () => {
   const events: string[] = [];
-  parseStreamLine(JSON.stringify({ type: 'assistant', message: { content: [{ type: 'text', text: 'hi' }, { type: 'tool_use', name: 'mcp__troupe__send_message', input: { to: 'Leo' } }] } }), (e) => events.push(`${e.kind}:${e.text}`));
-  assert.deepEqual(events, ['text:hi', 'tool:send_message {"to":"Leo"}']);
-  const r = parseStreamLine(JSON.stringify({ type: 'result', subtype: 'success', is_error: false, result: 'done', total_cost_usd: 0.5 }), () => {});
-  assert.deepEqual(r.result, { text: 'done', isError: false, costUsd: 0.5 });
-  const bad = parseStreamLine(JSON.stringify({ type: 'result', subtype: 'error_max_turns', is_error: true, result: '' }), () => {});
-  assert.equal(bad.result!.isError, true);
+  let usage: any;
+  const line = (o: object) => parseStreamLine(JSON.stringify(o), (e) => events.push(`${e.kind}:${e.text}`), (u) => (usage = u));
+  line({ type: 'assistant', message: { content: [{ type: 'text', text: 'hi' }, { type: 'tool_use', name: 'WebSearch', input: { query: 'note apps' } }] } });
+  assert.deepEqual(events, ['text:hi', 'tool:Searching the web: note apps']);
+  line({ type: 'rate_limit_event', rate_limit_info: { unifiedWindows: { five_hour: { utilization: 0.42, resetsAt: 100 }, seven_day: { utilization: 8, resetsAt: 200 } } } });
+  assert.deepEqual(usage, { fiveHour: { utilization: 0.42, resetsAt: 100 }, sevenDay: { utilization: 0.08, resetsAt: 200 } });
+  assert.deepEqual(line({ type: 'result', subtype: 'success', is_error: false, result: 'done', total_cost_usd: 0.5 }).result, { text: 'done', isError: false, costUsd: 0.5 });
+});
+
+test('user messages in an empty team get a hint', () => {
+  const { orch } = setup(() => ok(''));
+  const chat = orch.newChat('group');
+  orch.userMessage(chat.id, 'hello?');
+  assert.ok(orch.state.messages.some((m) => m.from === SYSTEM_ID && /Add an agent/.test(m.text)));
+  assert.equal(orch.state.messages[0].from, USER_ID);
 });

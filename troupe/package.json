@@ -2,7 +2,7 @@
   "name": "troupe",
   "productName": "Troupe",
   "version": "0.1.0",
-  "description": "A macOS app for hiring a team of Claude agents, giving them roles, and letting them work together. Runs on your Claude subscription via the Claude Code CLI.",
+  "description": "A simple macOS chat app where a small team of Claude agents work together. Runs on your Claude subscription via the Claude Code CLI.",
   "main": "dist/main.js",
   "private": true,
   "license": "MIT",

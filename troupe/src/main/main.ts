@@ -3,20 +3,17 @@ import path from 'node:path';
 import { Store } from '../core/store';
 import { Orchestrator } from '../core/orchestrator';
 import { ClaudeCliRunner, childEnv, claudeVersion, findClaude, loginShellPath } from '../core/claudeRunner';
-import { startBridge } from '../core/bridge';
 import type { AppState, TroupeApi } from '../shared/types';
-import { USER_ID } from '../shared/types';
 
 let win: BrowserWindow | null = null;
 let orch: Orchestrator;
-let closeBridge = () => {};
 let pathVar = process.env.PATH ?? '';
 
 function createWindow() {
   win = new BrowserWindow({
-    width: 1280,
-    height: 820,
-    minWidth: 900,
+    width: 1100,
+    height: 780,
+    minWidth: 720,
     minHeight: 560,
     title: 'Troupe',
     titleBarStyle: process.platform === 'darwin' ? 'hiddenInset' : 'default',
@@ -59,31 +56,24 @@ async function main() {
   orch = new Orchestrator(store, new ClaudeCliRunner(), {
     claudePath: findClaude(pathVar),
     childEnv: () => childEnv(pathVar, store.state.settings.forceSubscription),
-    // Run the bundled MCP server with Electron's own Node runtime.
-    mcpCommand: process.execPath,
-    mcpArgs: [path.join(__dirname, 'mcp.js')],
-    mcpEnv: { ELECTRON_RUN_AS_NODE: '1' },
   });
+  orch.seedStarterTeam();
   orch.on('state', pushState);
-  orch.on('activity', (e) => win?.webContents.send('activity', e));
+  orch.on('live', (l) => win?.webContents.send('live', l));
 
-  const api: Omit<TroupeApi, 'onState' | 'onActivity'> = {
+  const api: Omit<TroupeApi, 'onState' | 'onLive'> = {
     getState: async () => snapshot(),
-    getActivity: async (id) => orch.getActivity(id),
-    hireAgent: async (d) => orch.hireAgent(d),
+    getLive: async () => orch.getLive(),
+    addAgent: async (d) => orch.addAgent(d),
     updateAgent: async (id, p) => orch.updateAgent(id, p),
-    fireAgent: async (id) => orch.fireAgent(id),
-    resetAgentMemory: async (id) => orch.resetAgentMemory(id),
-    stopAgent: async (id) => orch.stopAgent(id),
-    createChannel: async (n, m, t) => orch.createChannel(n, m, t),
-    updateChannel: async (id, p) => orch.updateChannel(id, p),
-    deleteChannel: async (id) => orch.deleteChannel(id),
-    openDm: async (id) => orch.dm(USER_ID, id),
+    removeAgent: async (id) => orch.removeAgent(id),
+    newChat: async (t) => orch.newChat(t),
+    setChatTarget: async (c, t) => orch.setChatTarget(c, t),
+    renameChat: async (c, t) => orch.renameChat(c, t),
+    deleteChat: async (c) => orch.deleteChat(c),
     sendMessage: async (c, t) => orch.userMessage(c, t),
-    createTask: async (t) => orch.createTask(USER_ID, t, 0),
-    updateTask: async (id, p) => void orch.updateTask(USER_ID, id, p, 0),
+    stopChat: async (c) => orch.stopChat(c),
     updateSettings: async (p) => orch.updateSettings(p),
-    clearMessages: async (id) => orch.clearMessages(id),
     chooseDirectory: async () => {
       const r = await dialog.showOpenDialog(win!, { properties: ['openDirectory', 'createDirectory'] });
       return r.canceled ? null : r.filePaths[0];
@@ -106,9 +96,7 @@ async function main() {
     return fn(...args);
   });
 
-  const bridge = await startBridge(orch);
-  closeBridge = bridge.close;
-  orch.start(bridge.url);
+  orch.start();
   createWindow();
 }
 
@@ -120,7 +108,6 @@ app.on('activate', () => {
 });
 app.on('before-quit', () => {
   orch?.shutdown();
-  closeBridge();
 });
 
 main().catch((err) => {

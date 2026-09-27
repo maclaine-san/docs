@@ -2,7 +2,7 @@ import { spawn, execFile } from 'node:child_process';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import type { ToolPreset } from '../shared/types';
+import type { Capability, UsageWindow } from '../shared/types';
 
 export interface TurnRequest {
   claudePath: string;
@@ -14,9 +14,9 @@ export interface TurnRequest {
   systemPrompt: string;
   prompt: string;
   model: string;
-  tools: ToolPreset;
-  useMyMcpServers: boolean;
-  mcpConfig: object;
+  capability: Capability;
+  /** Replace Claude Code's default system prompt and skip skills, settings files and MCP servers. */
+  lean: boolean;
 }
 
 export interface TurnEvent {
@@ -38,34 +38,30 @@ export interface TurnHandle {
   cancel(): void;
 }
 
-/** Anything that can run one agent turn. The real one shells out to the claude CLI. */
-export interface Runner {
-  run(req: TurnRequest, onEvent: (e: TurnEvent) => void): TurnHandle;
+export interface TurnCallbacks {
+  onEvent(e: TurnEvent): void;
+  /** Subscription usage reported by Claude Code (rate_limit_event). */
+  onUsage?(u: { fiveHour?: UsageWindow; sevenDay?: UsageWindow }): void;
 }
 
-const TROUPE_TOOLS = 'mcp__troupe';
+/** Anything that can run one agent turn. The real one shells out to the claude CLI. */
+export interface Runner {
+  run(req: TurnRequest, cb: TurnCallbacks): TurnHandle;
+}
 
-/** Built-in Claude Code tools and auto-approved tools for each preset. */
-export function toolArgs(preset: ToolPreset): string[] {
-  switch (preset) {
+const WEB = ['WebSearch', 'WebFetch'];
+const FILES = ['Read', 'Glob', 'Grep', 'Edit', 'Write'];
+
+/** Built-in Claude Code tools and auto-approved tools for each capability. */
+export function toolArgs(cap: Capability): string[] {
+  switch (cap) {
     case 'chat':
-      return ['--tools', '', '--allowedTools', TROUPE_TOOLS];
-    case 'research':
-      return [
-        '--tools', 'WebSearch,WebFetch,Read,Glob,Grep',
-        '--allowedTools', `${TROUPE_TOOLS},WebSearch,WebFetch,Read,Glob,Grep`,
-      ];
-    case 'builder':
-      return [
-        '--permission-mode', 'acceptEdits',
-        '--allowedTools',
-        [
-          TROUPE_TOOLS, 'Read', 'Glob', 'Grep', 'Edit', 'Write', 'WebSearch', 'WebFetch', 'TodoWrite',
-          'Bash(ls:*)', 'Bash(cat:*)', 'Bash(git status:*)', 'Bash(git diff:*)', 'Bash(git log:*)',
-          'Bash(npm test:*)', 'Bash(npm run:*)', 'Bash(node:*)', 'Bash(python3:*)', 'Bash(mkdir:*)',
-        ].join(','),
-      ];
-    case 'autonomous':
+      return ['--tools', ''];
+    case 'web':
+      return ['--tools', WEB.join(','), '--allowedTools', WEB.join(',')];
+    case 'files':
+      return ['--tools', [...FILES, ...WEB].join(','), '--permission-mode', 'acceptEdits', '--allowedTools', [...FILES, ...WEB].join(',')];
+    case 'full':
       return ['--dangerously-skip-permissions'];
   }
 }
@@ -73,11 +69,14 @@ export function toolArgs(preset: ToolPreset): string[] {
 export function buildArgs(req: TurnRequest): string[] {
   const args = ['-p', '--output-format', 'stream-json', '--verbose'];
   args.push(...(req.resume ? ['--resume', req.sessionId] : ['--session-id', req.sessionId]));
-  args.push('--append-system-prompt', req.systemPrompt);
+  if (req.lean) {
+    // ~900 input tokens per chat turn instead of ~4,000.
+    args.push('--system-prompt', req.systemPrompt, '--disable-slash-commands', '--strict-mcp-config', '--setting-sources', '');
+  } else {
+    args.push('--append-system-prompt', req.systemPrompt);
+  }
   if (req.model) args.push('--model', req.model);
-  args.push('--mcp-config', JSON.stringify(req.mcpConfig));
-  if (!req.useMyMcpServers) args.push('--strict-mcp-config');
-  args.push(...toolArgs(req.tools));
+  args.push(...toolArgs(req.capability));
   return args;
 }
 
@@ -85,10 +84,26 @@ function short(s: string, n = 400): string {
   return s.length > n ? s.slice(0, n) + '…' : s;
 }
 
+/** A human-readable one-liner for a tool call, e.g. "Searching the web: note apps". */
+export function describeTool(name: string, input: any): string {
+  const arg = (k: string) => (typeof input?.[k] === 'string' ? short(input[k], 80) : '');
+  switch (name) {
+    case 'WebSearch': return `Searching the web: ${arg('query')}`;
+    case 'WebFetch': return `Reading ${arg('url')}`;
+    case 'Read': return `Reading ${arg('file_path')}`;
+    case 'Write': return `Writing ${arg('file_path')}`;
+    case 'Edit': return `Editing ${arg('file_path')}`;
+    case 'Glob': case 'Grep': return `Searching files: ${arg('pattern')}`;
+    case 'Bash': return `Running ${arg('command')}`;
+    default: return `Using ${name}`;
+  }
+}
+
 /** Turn one stream-json line from the CLI into UI events, and pick out the final result. */
 export function parseStreamLine(
   line: string,
   onEvent: (e: TurnEvent) => void,
+  onUsage?: TurnCallbacks['onUsage'],
 ): { result?: { text: string; isError: boolean; costUsd: number } } {
   let msg: any;
   try {
@@ -96,12 +111,16 @@ export function parseStreamLine(
   } catch {
     return {};
   }
-  if (msg.type === 'assistant' && Array.isArray(msg.message?.content)) {
+  if (msg.type === 'rate_limit_event') {
+    const w = msg.rate_limit_info?.unifiedWindows ?? {};
+    const win = (x: any): UsageWindow | undefined =>
+      x && typeof x.utilization === 'number' ? { utilization: x.utilization > 1 ? x.utilization / 100 : x.utilization, resetsAt: Number(x.resetsAt) || 0 } : undefined;
+    onUsage?.({ fiveHour: win(w.five_hour), sevenDay: win(w.seven_day) });
+  } else if (msg.type === 'assistant' && Array.isArray(msg.message?.content)) {
     for (const block of msg.message.content) {
       if (block.type === 'text' && block.text) onEvent({ kind: 'text', text: block.text });
       if (block.type === 'tool_use') {
-        const name = String(block.name ?? '').replace(/^mcp__troupe__/, '');
-        onEvent({ kind: 'tool', text: `${name} ${short(JSON.stringify(block.input ?? {}), 300)}` });
+        onEvent({ kind: 'tool', text: describeTool(String(block.name ?? ''), block.input ?? {}) });
       }
     }
   } else if (msg.type === 'user' && Array.isArray(msg.message?.content)) {
@@ -124,7 +143,8 @@ export function parseStreamLine(
 }
 
 export class ClaudeCliRunner implements Runner {
-  run(req: TurnRequest, onEvent: (e: TurnEvent) => void): TurnHandle {
+  run(req: TurnRequest, cb: TurnCallbacks): TurnHandle {
+    const { onEvent, onUsage } = cb;
     const child = spawn(req.claudePath, buildArgs(req), {
       cwd: req.cwd,
       env: req.env,
@@ -142,7 +162,7 @@ export class ClaudeCliRunner implements Runner {
         while ((i = buf.indexOf('\n')) >= 0) {
           const line = buf.slice(0, i).trim();
           buf = buf.slice(i + 1);
-          if (line) result = parseStreamLine(line, onEvent).result ?? result;
+          if (line) result = parseStreamLine(line, onEvent, onUsage).result ?? result;
         }
       });
       child.stderr.setEncoding('utf8');
@@ -152,7 +172,7 @@ export class ClaudeCliRunner implements Runner {
       });
       child.on('error', (err) => resolve({ ok: false, text: '', costUsd: 0, error: `Could not start claude: ${err.message}` }));
       child.on('close', (code) => {
-        if (buf.trim()) result = parseStreamLine(buf.trim(), onEvent).result ?? result;
+        if (buf.trim()) result = parseStreamLine(buf.trim(), onEvent, onUsage).result ?? result;
         if (cancelled) return resolve({ ok: false, text: '', costUsd: result?.costUsd ?? 0, error: 'Stopped' });
         if (result && !result.isError) return resolve({ ok: true, text: result.text, costUsd: result.costUsd });
         const detail = (result?.text || stderr.trim() || `claude exited with code ${code}`).slice(-2000);

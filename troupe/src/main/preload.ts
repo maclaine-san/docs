@@ -3,21 +3,17 @@ import type { TroupeApi } from '../shared/types';
 
 const call = (method: string) => (...args: unknown[]) => ipcRenderer.invoke('troupe', method, ...args);
 const methods = [
-  'getState', 'getActivity', 'hireAgent', 'updateAgent', 'fireAgent', 'resetAgentMemory', 'stopAgent',
-  'createChannel', 'updateChannel', 'deleteChannel', 'openDm', 'sendMessage', 'createTask', 'updateTask',
-  'updateSettings', 'checkClaude', 'chooseDirectory', 'clearMessages',
+  'getState', 'getLive', 'addAgent', 'updateAgent', 'removeAgent', 'newChat', 'setChatTarget', 'renameChat',
+  'deleteChat', 'sendMessage', 'stopChat', 'updateSettings', 'checkClaude', 'chooseDirectory',
 ] as const;
 
 const api = Object.fromEntries(methods.map((m) => [m, call(m)])) as unknown as TroupeApi;
-api.onState = (cb) => {
-  const fn = (_: unknown, s: any) => cb(s);
-  ipcRenderer.on('state', fn);
-  return () => ipcRenderer.off('state', fn);
+const listen = (channel: string) => (cb: (v: any) => void) => {
+  const fn = (_: unknown, v: any) => cb(v);
+  ipcRenderer.on(channel, fn);
+  return () => void ipcRenderer.off(channel, fn);
 };
-api.onActivity = (cb) => {
-  const fn = (_: unknown, e: any) => cb(e);
-  ipcRenderer.on('activity', fn);
-  return () => ipcRenderer.off('activity', fn);
-};
+api.onState = listen('state');
+api.onLive = listen('live');
 
 contextBridge.exposeInMainWorld('troupe', api);

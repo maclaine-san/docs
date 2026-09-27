@@ -3,160 +3,144 @@
 export const USER_ID = 'user';
 export const SYSTEM_ID = 'system';
 
-/** How much an agent is allowed to do on your machine. */
-export type ToolPreset = 'chat' | 'research' | 'builder' | 'autonomous';
-
-export type AgentStatus = 'idle' | 'queued' | 'working' | 'error';
+/** What an agent may do beyond talking. */
+export type Capability = 'chat' | 'web' | 'files' | 'full';
 
 export interface Agent {
   id: string;
   name: string;
-  /** Short job title, e.g. "Engineering Lead". */
-  role: string;
-  /** What this agent owns and is accountable for. Free text. */
-  responsibilities: string;
-  /** Extra instructions appended to the agent's system prompt. */
-  instructions: string;
-  /** Claude model alias ("opus", "sonnet", "haiku", ...) or "" for the CLI default. */
+  emoji: string;
+  /** Hue (0-360) for the agent's avatar and name colour. */
+  hue: number;
+  /** Who they are: role, personality, what they're good at. */
+  persona: string;
+  /** Claude model alias ("opus", "sonnet", "haiku", ...). */
   model: string;
-  /** Agent id of this agent's manager, or "" if it reports to you. */
-  reportsTo: string;
-  tools: ToolPreset;
-  /** Load the MCP servers from your own Claude Code config as well as Troupe's. */
-  useMyMcpServers: boolean;
-  /** Working directory override. Empty = the workspace directory. */
-  cwd: string;
-  /** Wake the agent every N minutes to check its tasks. 0 = off. */
-  heartbeatMinutes: number;
-  /** Claude Code session id backing this agent's memory. */
-  sessionId: string;
-  /** True once the session has had its first turn (so we resume instead of create). */
-  sessionStarted: boolean;
-  /** Bumped when role/responsibilities change so the next turn re-briefs the agent. */
-  profileVersion: number;
-  briefedProfileVersion: number;
-  status: AgentStatus;
-  lastError: string;
-  lastHeartbeatAt: number;
-  paused: boolean;
+  capability: Capability;
+  /** The lead answers messages sent to the whole group and brings others in. */
+  isLead: boolean;
   createdAt: number;
   turns: number;
   costUsd: number;
 }
 
-export type ChannelKind = 'channel' | 'dm';
+/** One agent's Claude Code session inside one chat. New chat = fresh, small context. */
+export interface Seat {
+  sessionId: string;
+  started: boolean;
+  /** Timestamp of the last chat message this agent has seen. */
+  seenUntil: number;
+  /** Team roster version the agent was last told about. */
+  teamVersion: number;
+}
 
-export interface Channel {
+export interface Chat {
   id: string;
-  name: string;
-  kind: ChannelKind;
-  /** Participant ids: agent ids and/or USER_ID. */
-  members: string[];
-  topic: string;
+  title: string;
+  /** Who your messages go to by default: "group" (the lead) or an agent id. */
+  target: string;
+  seats: Record<string, Seat>;
   createdAt: number;
+  updatedAt: number;
 }
 
 export interface Message {
   id: string;
-  channelId: string;
+  chatId: string;
   /** Agent id, USER_ID or SYSTEM_ID. */
   from: string;
   text: string;
   ts: number;
   /** Hops away from a human message. Used to stop runaway agent loops. */
   depth: number;
-  taskId?: string;
 }
 
-export type TaskStatus = 'todo' | 'in_progress' | 'blocked' | 'done';
-
-export interface Task {
-  id: string;
-  title: string;
-  description: string;
-  assigneeId: string;
-  createdBy: string;
-  status: TaskStatus;
-  result: string;
-  createdAt: number;
-  updatedAt: number;
-}
-
-/** A pending message waiting to be delivered to an agent on its next turn. */
+/** A pending delivery: `agentId` should read `messageId` in `chatId` on its next turn. */
 export interface InboxItem {
-  messageId: string;
+  chatId: string;
   agentId: string;
+  messageId: string;
+  /** Agent that @mentioned this agent and is waiting for the answer. */
+  askedBy?: string;
 }
+
+export type PauseReason = '' | 'user' | 'daily_cap' | 'usage_limit';
 
 export interface Settings {
   /** Absolute path to the claude CLI. Empty = auto-detect. */
   claudePath: string;
-  /** Shared folder the team works in. */
+  /** Folder agents with file access work in. */
   workspaceDir: string;
-  /** How many agents may run at the same time. Keep low on a subscription. */
+  /** How many agents may run at the same time. */
   maxConcurrent: number;
-  /** Max hops of agent-to-agent messages after a human message. */
+  /** Max agent-to-agent hops after one message from you. */
   maxDepth: number;
   /** Strip ANTHROPIC_API_KEY etc. so the CLI uses your subscription login. */
   forceSubscription: boolean;
-  /** Global pause: nothing new starts while true. */
+  /** Replace Claude Code's large default system prompt and skip skills, settings and MCP servers. */
+  leanMode: boolean;
+  /** Stop after this many agent turns per day. 0 = no cap. */
+  dailyTurnCap: number;
+  /** Pause when the 5-hour usage window reaches this fraction (0-1). 0 = never. */
+  usagePauseAt: number;
   paused: boolean;
-  defaultModel: string;
+  pauseReason: PauseReason;
 }
 
-export interface ActivityEntry {
-  id: string;
-  agentId: string;
-  ts: number;
-  kind: 'turn_start' | 'text' | 'tool' | 'tool_result' | 'turn_end' | 'error' | 'stderr';
-  text: string;
+export interface UsageWindow {
+  /** 0-1 fraction of the window used, as reported by Claude Code. */
+  utilization: number;
+  /** Unix seconds. */
+  resetsAt: number;
+}
+
+export interface Usage {
+  day: string;
+  turnsToday: number;
+  fiveHour?: UsageWindow;
+  sevenDay?: UsageWindow;
+  updatedAt: number;
 }
 
 export interface AppState {
-  version: 1;
+  version: 2;
   settings: Settings;
   agents: Agent[];
-  channels: Channel[];
+  chats: Chat[];
   messages: Message[];
-  tasks: Task[];
   inbox: InboxItem[];
-  nextTaskNumber: number;
+  usage: Usage;
+  /** Bumped whenever agents are added, removed or renamed. */
+  teamVersion: number;
 }
 
-export type AgentDraft = Pick<
-  Agent,
-  | 'name'
-  | 'role'
-  | 'responsibilities'
-  | 'instructions'
-  | 'model'
-  | 'reportsTo'
-  | 'tools'
-  | 'useMyMcpServers'
-  | 'cwd'
-  | 'heartbeatMinutes'
->;
+/** What an agent is doing right now, for the "thinking…" line in a chat. */
+export interface LiveStatus {
+  chatId: string;
+  agentId: string;
+  /** Latest step, e.g. "Searching the web: note app users". Empty while thinking. */
+  step: string;
+  since: number;
+}
+
+export type AgentDraft = Pick<Agent, 'name' | 'emoji' | 'hue' | 'persona' | 'model' | 'capability' | 'isLead'>;
 
 /** The API the preload script exposes to the renderer as window.troupe. */
 export interface TroupeApi {
   getState(): Promise<AppState>;
-  getActivity(agentId: string): Promise<ActivityEntry[]>;
+  getLive(): Promise<LiveStatus[]>;
   onState(cb: (s: AppState) => void): () => void;
-  onActivity(cb: (e: ActivityEntry) => void): () => void;
-  hireAgent(draft: AgentDraft): Promise<Agent>;
-  updateAgent(id: string, patch: Partial<AgentDraft> & { paused?: boolean }): Promise<void>;
-  fireAgent(id: string): Promise<void>;
-  resetAgentMemory(id: string): Promise<void>;
-  stopAgent(id: string): Promise<void>;
-  createChannel(name: string, memberIds: string[], topic: string): Promise<Channel>;
-  updateChannel(id: string, patch: Partial<Pick<Channel, 'name' | 'members' | 'topic'>>): Promise<void>;
-  deleteChannel(id: string): Promise<void>;
-  openDm(agentId: string): Promise<Channel>;
-  sendMessage(channelId: string, text: string): Promise<void>;
-  createTask(t: { title: string; description: string; assigneeId: string }): Promise<Task>;
-  updateTask(id: string, patch: Partial<Pick<Task, 'status' | 'title' | 'description' | 'assigneeId' | 'result'>>): Promise<void>;
+  onLive(cb: (l: LiveStatus[]) => void): () => void;
+  addAgent(draft: AgentDraft): Promise<Agent>;
+  updateAgent(id: string, patch: Partial<AgentDraft>): Promise<void>;
+  removeAgent(id: string): Promise<void>;
+  newChat(target: string): Promise<Chat>;
+  setChatTarget(chatId: string, target: string): Promise<void>;
+  renameChat(chatId: string, title: string): Promise<void>;
+  deleteChat(chatId: string): Promise<void>;
+  sendMessage(chatId: string, text: string): Promise<void>;
+  stopChat(chatId: string): Promise<void>;
   updateSettings(patch: Partial<Settings>): Promise<void>;
   checkClaude(): Promise<{ ok: boolean; path: string; version: string; error?: string }>;
   chooseDirectory(): Promise<string | null>;
-  clearMessages(channelId: string): Promise<void>;
 }

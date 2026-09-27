@@ -2,31 +2,38 @@ import fs from 'node:fs';
 import path from 'node:path';
 import type { AppState, Settings } from '../shared/types';
 
-/** Messages kept per channel on disk. Older ones are dropped. */
-const MAX_MESSAGES_PER_CHANNEL = 2000;
+/** Messages kept per chat on disk. Older ones are dropped. */
+const MAX_MESSAGES_PER_CHAT = 1000;
 
 export function defaultSettings(dataDir: string): Settings {
   return {
     claudePath: '',
     workspaceDir: path.join(dataDir, 'workspace'),
     maxConcurrent: 2,
-    maxDepth: 8,
+    maxDepth: 6,
     forceSubscription: true,
+    leanMode: true,
+    dailyTurnCap: 150,
+    usagePauseAt: 0.8,
     paused: false,
-    defaultModel: 'sonnet',
+    pauseReason: '',
   };
+}
+
+export function today(): string {
+  return new Date().toISOString().slice(0, 10);
 }
 
 export function emptyState(dataDir: string): AppState {
   return {
-    version: 1,
+    version: 2,
     settings: defaultSettings(dataDir),
     agents: [],
-    channels: [],
+    chats: [],
     messages: [],
-    tasks: [],
     inbox: [],
-    nextTaskNumber: 1,
+    usage: { day: today(), turnsToday: 0, updatedAt: 0 },
+    teamVersion: 1,
   };
 }
 
@@ -45,11 +52,9 @@ export class Store {
   private load(): AppState {
     const fresh = emptyState(this.dataDir);
     try {
-      const raw = JSON.parse(fs.readFileSync(this.file, 'utf8')) as AppState;
-      const state: AppState = { ...fresh, ...raw, settings: { ...fresh.settings, ...raw.settings } };
-      // Nothing is running after a restart.
-      for (const a of state.agents) if (a.status === 'working' || a.status === 'queued') a.status = 'idle';
-      return state;
+      const raw = JSON.parse(fs.readFileSync(this.file, 'utf8'));
+      if (raw.version !== 2) return fresh; // pre-release format: start over
+      return { ...fresh, ...raw, settings: { ...fresh.settings, ...raw.settings }, usage: { ...fresh.usage, ...raw.usage } };
     } catch {
       return fresh;
     }
@@ -70,7 +75,7 @@ export class Store {
     }
     this.trim();
     const tmp = this.file + '.tmp';
-    fs.writeFileSync(tmp, JSON.stringify(this.state, null, 1));
+    fs.writeFileSync(tmp, JSON.stringify(this.state));
     fs.renameSync(tmp, this.file);
   }
 
@@ -79,9 +84,9 @@ export class Store {
     const keep: typeof this.state.messages = [];
     for (let i = this.state.messages.length - 1; i >= 0; i--) {
       const m = this.state.messages[i];
-      const n = (counts.get(m.channelId) ?? 0) + 1;
-      counts.set(m.channelId, n);
-      if (n <= MAX_MESSAGES_PER_CHANNEL) keep.push(m);
+      const n = (counts.get(m.chatId) ?? 0) + 1;
+      counts.set(m.chatId, n);
+      if (n <= MAX_MESSAGES_PER_CHAT) keep.push(m);
     }
     if (keep.length !== this.state.messages.length) this.state.messages = keep.reverse();
   }

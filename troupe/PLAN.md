@@ -1,98 +1,79 @@
 # Troupe: plan
 
-A macOS app where you **hire AI agents, give them roles and responsibilities, and let them talk to and work with each other**, in the same spirit as Paperclip, Hermes and Grok-style agent bots. It runs on your **Claude subscription (Pro/Max)**, not an API key.
+A **simple, chat-first** macOS app, in the spirit of Grok or a Muse-style companion app rather than an "AI company" dashboard. You chat with a small team of agents. Each has a name, emoji and personality. They answer in one thread and help each other when useful. It runs on a **Claude Pro/Max subscription**, not an API key, and is designed to use as few tokens as possible.
 
-## 1. Key decision: how to use a subscription instead of the API
+## Principles
 
-The Anthropic API (and the Agent SDK's default auth) bills per token against an API key. A Pro/Max subscription is only usable through Anthropic's own clients, one of which is **Claude Code**. Claude Code has a documented headless mode:
+1. **It's a chat.** No org charts, task boards or permission grids on screen. There's a chat list, agent tabs, a message box, and one settings sheet.
+2. **One voice by default.** Messages to the group go to the lead, who answers directly and only pulls others in when that clearly helps.
+3. **Cheap by default.** Every design choice is checked against "how many tokens does this add per turn?"
+
+## Using the subscription
+
+Each agent in each chat is a Claude Code session driven through the `claude` CLI you've already logged into:
 
 ```
-claude -p --output-format stream-json --verbose \
-       --session-id <uuid> | --resume <uuid> \
-       --append-system-prompt "<role>" --model sonnet \
-       --mcp-config '<json>' --allowedTools mcp__troupe
+claude -p --output-format stream-json --verbose
+       --session-id <uuid> | --resume <uuid>
+       --system-prompt "<short persona prompt>"      # lean mode
+       --disable-slash-commands --strict-mcp-config --setting-sources ""
+       --tools "" | "WebSearch,WebFetch" | …        # by capability
+       --model haiku|sonnet|opus
 ```
 
-So **each agent is a persistent Claude Code session** that Troupe drives with the `claude` CLI you've already logged into. Consequences:
+`ANTHROPIC_API_KEY` is removed from the child environment so an API key is never billed. Claude Code's `rate_limit_event` stream reports the 5-hour and weekly utilization, which drives the usage meter and the auto-pause.
 
-| | |
+## UX
+
+```
+┌────────────┬─────────────────────────────────────────┐
+│ ◆ Troupe   │ [👥 Group] [✦ Nova] [🔎 Scout] [✍ Quill] [+] │
+│ ✎ New chat │─────────────────────────────────────────│
+│            │                 you: plan my newsletter │
+│ Today      │ ✦ Nova: names: … @Scout who reads plant │
+│ • Newsl…   │         content?                        │
+│ • Kyoto…   │ 🔎 Scout: 68% are millennials …          │
+│            │ ✦ Nova: here's the full package: …       │
+│ 5h ▓▓░ 23% │ ┌─────────────────────────────────────┐ │
+│ ⚙ Settings │ │ Message the group or @mention…    ↑ │ │
+└────────────┴─┴─────────────────────────────────────┴─┘
+```
+
+- Tabs choose who gets your message: the Group (the lead) or one agent. `@mentions` override the tab.
+- Live "thinking" rows show what each agent is doing, e.g. "Searching the web: …".
+- Sidebar: chat history (Today, Yesterday…), usage meter, settings.
+- Agent sheet: emoji and colour, name, "who are they?", model, what they can use, and a lead toggle.
+
+## How agents collaborate
+
+- An agent's reply is posted to the chat. If it `@mentions` teammates, each of them is woken with the request.
+- The asker **waits for all of them** and is then woken **once** with every answer. For example, three agents asked means one follow-up turn, not three.
+- A teammate that fails still releases the asker, so nobody waits forever.
+- Hop limit: every message carries its distance from your last message. Past the limit (default 6), mentions are not delivered.
+
+## Token budget per turn (lean mode)
+
+| Part | Size |
 |---|---|
-| ✅ Uses your subscription | The CLI uses whatever account `claude /login` is signed into. Troupe strips `ANTHROPIC_API_KEY` from the child environment by default so an API key is never billed by accident. |
-| ✅ Real memory per agent | `--session-id` on the first turn, `--resume` after that. Every agent keeps its own conversation history, and Claude Code's auto-compaction handles long histories. |
-| ✅ Real tools | Agents can get file editing, shell, web search and your own MCP servers, depending on the permission preset. |
-| ⚠️ Shared usage limits | All agents draw from the same 5-hour/weekly subscription limits. Troupe defaults to **2 agents at once**, a **loop limit**, and puts an agent **on hold** (keeping its messages) when a turn fails, e.g. on a usage limit. |
-| ⚠️ Terms | This is personal automation of the official CLI on your own machine. Don't turn it into a hosted service that other people use with your login. Check Anthropic's current terms before distributing it. |
+| Claude Code base (with `--system-prompt`, no tools) | ~800 tokens |
+| Persona + roster + rules | ~150–300 tokens |
+| New messages since the agent's last turn | ≤12 messages × ≤1,500 chars |
+| Tool definitions | 0 for chat-only agents; ~1.6k for web search |
 
-## 2. Architecture
+Measured: a chat-only turn is about 900 input tokens in lean mode, against about 4,050 with Claude Code's default prompt.
 
-```
-┌──────────────────────── Troupe.app (Electron) ─────────────────────────┐
-│  Renderer (React)             Main process (Node)                       │
-│  ─────────────────            ───────────────────────────────────────── │
-│  Team / org chart   ◀─IPC─▶  Orchestrator                               │
-│  Channels & DMs                 • store (state.json)                    │
-│  Agent: chat,                   • router: who does a message wake?      │
-│    live activity, profile       • scheduler: inbox → turns, concurrency │
-│  Task board                     • loop guard, heartbeats, error hold    │
-│  Hire / settings                ClaudeCliRunner ── spawns ──┐           │
-│                                 Bridge (127.0.0.1, per-agent token) ◀┐  │
-└─────────────────────────────────────────────────────────────┼──────┼──┘
-                                                              ▼      │
-                                  claude -p (one per agent turn)     │
-                                     └── MCP stdio: troupe server ───┘
-                                         send_message, create_task,
-                                         update_task, list_tasks,
-                                         list_team, read_channel
-```
+## Milestones
 
-* **Agents talk to each other through tools, not free text.** Each `claude` process launches Troupe's small MCP server (`dist/mcp.js`, run with Electron's own Node), which forwards tool calls to the app over a localhost bridge. Every agent gets its own bearer token, so it can only act as itself.
-* **Push model.** When a message or task reaches an agent it goes into that agent's inbox. The scheduler starts a turn when the agent is free and a concurrency slot is open. The turn prompt contains the new messages, the current roster and the agent's open tasks.
-* **Final replies.** If you messaged the agent, its final text is posted back to you. Otherwise the final text stays in its private work log. This keeps agents from auto-replying to each other forever.
+**v0.2 (this PR)**
+- [x] Chat-first UI: chat history, agent tabs, @mention autocomplete, live thinking rows, stop, agent editor, settings sheet
+- [x] Orchestrator: per-chat sessions, @mention routing, wait-for-all answers, hop limit, concurrency limit
+- [x] Lean mode, daily turn cap, auto-pause on 5-hour usage (auto-resume at reset), usage meter
+- [x] Unit tests (fake runner), real CLI end-to-end, UI driven in Electron
 
-### Routing rules
-
-| Message | Who wakes up |
-|---|---|
-| DM | the other participant |
-| Channel message from you | every agent in the channel, or only the ones you @mention |
-| Channel message from an agent | only @mentioned agents (`@all` for everyone) |
-| `create_task` | the assignee (via a DM from the creator) |
-| `update_task` → done/blocked | the task's creator |
-
-**Loop guard:** every message has a *depth*, the number of agent hops since a human message. Past the limit (default 8), messages are posted but not delivered, and the team waits for you.
-
-## 3. Data model
-
-`Agent` (name, role, responsibilities, instructions, model, reportsTo, tool preset, cwd, heartbeat, sessionId, status) · `Channel` (channel or DM, members) · `Message` (from, text, depth, taskId) · `Task` (T-n, assignee, creator, status, result) · `Inbox` (pending deliveries) · `Settings`. All of it lives in `~/Library/Application Support/Troupe/state.json`.
-
-## 4. Permission presets
-
-| Preset | Claude Code flags |
-|---|---|
-| Chat only | `--tools ""` (no built-ins), Troupe tools only |
-| Research | WebSearch, WebFetch, Read, Glob, Grep |
-| Builder | `--permission-mode acceptEdits` plus file tools and a short allowlist of safe shell commands |
-| Full autonomy | `--dangerously-skip-permissions` (with a warning in the UI) |
-
-Anything outside the preset is denied automatically, because nobody is there to answer a permission prompt in `-p` mode.
-
-## 5. Milestones
-
-**v0.1 (this PR)**
-- [x] Orchestrator: routing, inbox, scheduler, concurrency limit, loop guard, heartbeats, pause/resume, error hold and retry, lost-session recovery
-- [x] Claude CLI runner: stream-json parsing, cancellation, login-shell PATH discovery (Finder-launched apps don't get your PATH)
-- [x] MCP server and authenticated localhost bridge
-- [x] UI: org chart, channels, DMs, a read-only backchannel of agent↔agent DMs, per-agent live activity, profile editing (re-briefed on the next turn), hire templates, task board, settings
-- [x] Unit tests with a fake runner; headless end-to-end test against the real CLI
-
-**v0.2**
-- Approvals inbox: agents ask before spending, hiring or running risky commands (`--permission-prompt-tool` routed to the UI)
-- `request_hire` tool so a lead agent can propose new teammates for you to approve
-- Usage meter from the CLI's `rate_limit_event` stream, with auto-pause near the limit and auto-resume after the reset
-- Menu-bar extra, notifications when an agent messages you, global hotkey
-
-**v0.3**
-- Goals/projects above tasks (Paperclip-style), budgets per agent, scheduled routines
-- Git worktree per builder agent to avoid edit conflicts
-- Export/import team templates ("companies")
-- Native SwiftUI shell reusing the same engine as a local helper, if the Electron footprint matters
+**Next**
+- Menu-bar quick chat with a global hotkey
+- Notifications when a long answer finishes
+- Attach files and images to a message
+- Voice input
+- "Remember this" memory notes per agent that carry across chats (small, capped)
+- Signed, notarized `.dmg`
