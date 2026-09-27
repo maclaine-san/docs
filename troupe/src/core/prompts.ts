@@ -1,9 +1,10 @@
-import type { Agent, AppState, Message } from '../shared/types';
+import type { Agent, AppState, Message, Project } from '../shared/types';
 import { USER_ID, SYSTEM_ID } from '../shared/types';
 
 /** Max earlier chat messages shown to an agent per turn, and max characters each. */
 const CONTEXT_MESSAGES = 12;
 const CONTEXT_CHARS = 1500;
+const INSTRUCTIONS_CHARS = 3000;
 
 function firstLine(s: string, n = 90): string {
   const line = s.trim().split('\n')[0];
@@ -16,8 +17,34 @@ export function roster(state: AppState, self: Agent): string {
   return others.map((a) => `- @${a.name}${a.isLead ? ' (lead)' : ''}: ${firstLine(a.persona) || 'no description'}`).join('\n');
 }
 
+export interface ProjectContext {
+  project: Project;
+  /** This agent can open files in the project's folders. */
+  canRead: boolean;
+  /** This agent can also create and edit files there. */
+  canEdit: boolean;
+}
+
+export function projectBrief(ctx: ProjectContext): string {
+  const { project, canRead, canEdit } = ctx;
+  const lines = [`Project: ${project.name}`];
+  if (project.folders.length) {
+    lines.push(`Project folders: ${project.folders.join(', ')}`);
+    lines.push(
+      canEdit
+        ? 'You can read and edit files there. Look only at what the task needs (use Glob/Grep before Read); do not read whole trees.'
+        : canRead
+          ? 'You can read files there (read-only). Look only at what the question needs (use Glob/Grep before Read); do not read whole trees.'
+          : 'You cannot open these files. If you need their contents, @mention a teammate who can, or ask the user.',
+    );
+  }
+  const ins = project.instructions.trim();
+  if (ins) lines.push(`Project instructions:\n${ins.length > INSTRUCTIONS_CHARS ? ins.slice(0, INSTRUCTIONS_CHARS) + ' […]' : ins}`);
+  return lines.join('\n');
+}
+
 /** Kept short on purpose: in lean mode this replaces Claude Code's whole system prompt. */
-export function systemPrompt(state: AppState, agent: Agent, workdir: string): string {
+export function systemPrompt(state: AppState, agent: Agent, workdir: string, project?: ProjectContext): string {
   const lines = [
     `You are ${agent.name}. ${agent.persona.trim()}`,
     '',
@@ -35,7 +62,8 @@ export function systemPrompt(state: AppState, agent: Agent, workdir: string): st
       '- You are the lead. When the user writes to the group, answer yourself if you can. Bring teammates in only when their skills clearly help, and ask everyone you need in one message. When their answers arrive, give the user one combined final answer.',
     );
   }
-  if (agent.capability === 'files' || agent.capability === 'full') lines.push(`- Your working folder is ${workdir}. Save substantial deliverables there as files.`);
+  if (project) lines.push('', projectBrief(project));
+  else if (agent.capability === 'files' || agent.capability === 'full') lines.push(`- Your working folder is ${workdir}. Save substantial deliverables there as files.`);
   return lines.join('\n');
 }
 
@@ -59,8 +87,10 @@ export function turnPrompt(
   unseen: Message[],
   addressedBy: string[],
   teamChanged: boolean,
+  projectUpdate?: ProjectContext,
 ): string {
   const parts: string[] = [];
+  if (projectUpdate) parts.push(`(Project update:\n${projectBrief(projectUpdate)})`);
   if (teamChanged) parts.push(`(Team update. You are ${agent.name}${agent.isLead ? ', the lead' : ''}: ${agent.persona}\nYour teammates are now:\n${roster(state, agent)})`);
   const others = unseen.filter((m) => m.from !== agent.id);
   const shown = others.slice(-CONTEXT_MESSAGES);

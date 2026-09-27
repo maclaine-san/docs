@@ -24,6 +24,24 @@ export interface Agent {
   costUsd: number;
 }
 
+/** Who may read a project's folders. Agents with the "files" or "full" capability always can. */
+export type ProjectReadAccess = 'lead' | 'all' | 'none';
+
+/** A group of chats that share attached folders and instructions. */
+export interface Project {
+  id: string;
+  name: string;
+  /** Absolute paths. The first is the working directory; the rest are added with --add-dir. */
+  folders: string[];
+  /** Shared context every agent gets in this project's chats. */
+  instructions: string;
+  readAccess: ProjectReadAccess;
+  /** Bumped when folders or instructions change, so open chats are re-briefed. */
+  version: number;
+  createdAt: number;
+  updatedAt: number;
+}
+
 /** One agent's Claude Code session inside one chat. New chat = fresh, small context. */
 export interface Seat {
   sessionId: string;
@@ -32,6 +50,8 @@ export interface Seat {
   seenUntil: number;
   /** Team roster version the agent was last told about. */
   teamVersion: number;
+  /** Project version the agent was last told about. */
+  projectVersion?: number;
 }
 
 export interface Chat {
@@ -39,6 +59,8 @@ export interface Chat {
   title: string;
   /** Who your messages go to by default: "group" (the lead) or an agent id. */
   target: string;
+  /** Project this chat belongs to, or "". */
+  projectId: string;
   seats: Record<string, Seat>;
   createdAt: number;
   updatedAt: number;
@@ -106,6 +128,7 @@ export interface AppState {
   version: 2;
   settings: Settings;
   agents: Agent[];
+  projects: Project[];
   chats: Chat[];
   messages: Message[];
   inbox: InboxItem[];
@@ -134,7 +157,16 @@ export interface TroupeApi {
   addAgent(draft: AgentDraft): Promise<Agent>;
   updateAgent(id: string, patch: Partial<AgentDraft>): Promise<void>;
   removeAgent(id: string): Promise<void>;
-  newChat(target: string): Promise<Chat>;
+  newChat(target: string, projectId?: string): Promise<Chat>;
+  moveChat(chatId: string, projectId: string): Promise<void>;
+  createProject(name: string, folders: string[]): Promise<Project>;
+  updateProject(id: string, patch: Partial<Pick<Project, 'name' | 'folders' | 'instructions' | 'readAccess'>>): Promise<void>;
+  deleteProject(id: string): Promise<void>;
+  /** Pick folders with the system dialog. */
+  chooseDirectories(): Promise<string[]>;
+  /** Absolute path of a dropped file or folder. */
+  pathForFile(file: File): string;
+  showInFinder(path: string): Promise<void>;
   setChatTarget(chatId: string, target: string): Promise<void>;
   renameChat(chatId: string, title: string): Promise<void>;
   deleteChat(chatId: string): Promise<void>;

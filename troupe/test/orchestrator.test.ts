@@ -320,3 +320,122 @@ test('user messages in an empty team get a hint', () => {
   assert.ok(orch.state.messages.some((m) => m.from === SYSTEM_ID && /Add an agent/.test(m.text)));
   assert.equal(orch.state.messages[0].from, USER_ID);
 });
+
+// ------------------------------------------------------------------ projects
+
+function tmpDir(name: string) {
+  const d = fs.mkdtempSync(path.join(os.tmpdir(), `troupe-${name}-`));
+  return d;
+}
+
+test('project chats run in the project folder and brief agents on it', async () => {
+  const { orch, runner } = setup((_req, name) => ok(name === 'Nova' ? '@Scout check the numbers' : '42'));
+  orch.addAgent(draft('Nova', { isLead: true }));
+  orch.addAgent(draft('Scout', { capability: 'web' }));
+  const main = tmpDir('main');
+  const extra = tmpDir('extra');
+  const p = orch.createProject('', [main, extra]);
+  assert.equal(p.name, path.basename(main));
+  orch.updateProject(p.id, { instructions: 'We are building Inkwell.' });
+  const chat = orch.newChat('group', p.id);
+  orch.userMessage(chat.id, 'what is the answer?');
+  await idle(orch);
+  const [lead, helper] = runner.calls.map((c) => c.req);
+  assert.equal(lead.cwd, main);
+  assert.deepEqual(lead.addDirs, [extra]);
+  assert.equal(lead.readFiles, true, 'the lead can read by default');
+  assert.equal(helper.readFiles, false, 'helpers cannot by default');
+  assert.match(lead.systemPrompt, /Project: .*\n[\s\S]*You can read files there[\s\S]*We are building Inkwell/);
+  assert.match(helper.systemPrompt, /You cannot open these files/);
+});
+
+test('project read access: everyone, nobody; file agents can always edit', async () => {
+  const { orch, runner } = setup(() => ok('ok'));
+  orch.addAgent(draft('Nova', { isLead: true }));
+  orch.addAgent(draft('Byte', { capability: 'files' }));
+  orch.addAgent(draft('Quill'));
+  const p = orch.createProject('Site', [tmpDir('site')]);
+  const chat = orch.newChat('group', p.id);
+  orch.updateProject(p.id, { readAccess: 'all' });
+  orch.userMessage(chat.id, '@Quill hi');
+  await idle(orch);
+  orch.updateProject(p.id, { readAccess: 'none' });
+  orch.userMessage(chat.id, '@Nova @Byte hi');
+  await idle(orch);
+  const by = (n: string, i = 0) => runner.calls.filter((c) => c.agent === n)[i].req;
+  assert.equal(by('Quill').readFiles, true);
+  assert.equal(by('Nova').readFiles, false);
+  assert.equal(by('Byte').readFiles, false, 'files agents already have file tools');
+  assert.match(by('Byte').systemPrompt, /read and edit files there/);
+});
+
+test('changing project instructions re-briefs open chats once', async () => {
+  const { orch, runner } = setup(() => ok('ok'));
+  orch.addAgent(draft('Nova', { isLead: true }));
+  const p = orch.createProject('X', []);
+  const chat = orch.newChat('group', p.id);
+  orch.userMessage(chat.id, 'one');
+  await idle(orch);
+  orch.updateProject(p.id, { instructions: 'Use British spelling.' });
+  orch.userMessage(chat.id, 'two');
+  await idle(orch);
+  orch.userMessage(chat.id, 'three');
+  await idle(orch);
+  assert.match(runner.calls[1].req.prompt, /Project update[\s\S]*British spelling/);
+  assert.doesNotMatch(runner.calls[2].req.prompt, /Project update/);
+});
+
+test('moving a chat into a project briefs agents and switches folders', async () => {
+  const { orch, runner } = setup(() => ok('ok'));
+  orch.addAgent(draft('Nova', { isLead: true }));
+  const dir = tmpDir('mv');
+  const chat = orch.newChat('group');
+  orch.userMessage(chat.id, 'one');
+  await idle(orch);
+  const p = orch.createProject('Moved', [dir]);
+  orch.moveChat(chat.id, p.id);
+  orch.userMessage(chat.id, 'two');
+  await idle(orch);
+  assert.equal(runner.calls[1].req.cwd, dir);
+  assert.match(runner.calls[1].req.prompt, /Project update[\s\S]*Project: Moved/);
+});
+
+test('a missing project folder is reported instead of running', async () => {
+  const { orch, runner } = setup(() => ok('ok'));
+  orch.addAgent(draft('Nova', { isLead: true }));
+  const dir = tmpDir('gone');
+  const p = orch.createProject('Gone', [dir]);
+  fs.rmSync(dir, { recursive: true });
+  const chat = orch.newChat('group', p.id);
+  orch.userMessage(chat.id, 'hi');
+  await idle(orch);
+  assert.equal(runner.calls.length, 0);
+  assert.ok(orch.state.messages.some((m) => m.from === SYSTEM_ID && /Can't find/.test(m.text)));
+});
+
+test('projects validate folders and deleting one removes its chats only', () => {
+  const { orch } = setup(() => ok(''));
+  assert.throws(() => orch.createProject('bad', ['/definitely/not/here']), /not a folder/);
+  const p = orch.createProject('P', [tmpDir('p')]);
+  const inP = orch.newChat('group', p.id);
+  orch.userMessage(inP.id, 'x');
+  const outside = orch.newChat('group');
+  orch.userMessage(outside.id, 'y');
+  orch.deleteProject(p.id);
+  assert.deepEqual(orch.state.chats.map((c) => c.id), [outside.id]);
+  assert.equal(orch.state.projects.length, 0);
+});
+
+test('read-only file tools and extra folders reach the CLI', () => {
+  const base: TurnRequest = {
+    claudePath: 'claude', cwd: '/a', env: {}, sessionId: 'sid', resume: false, systemPrompt: 'sys', prompt: 'p',
+    model: 'haiku', capability: 'chat', lean: true, readFiles: true, addDirs: ['/b', '/c'],
+  };
+  const args = buildArgs(base);
+  assert.equal(args[args.indexOf('--tools') + 1], 'Read,Glob,Grep');
+  assert.equal(args[args.indexOf('--allowedTools') + 1], 'Read,Glob,Grep');
+  assert.deepEqual(args.slice(args.indexOf('--add-dir'), args.indexOf('--add-dir') + 3), ['--add-dir', '/b', '/c']);
+  const web = buildArgs({ ...base, capability: 'web', addDirs: [] });
+  assert.equal(web[web.indexOf('--tools') + 1], 'WebSearch,WebFetch,Read,Glob,Grep');
+  assert.ok(!web.includes('--add-dir'));
+});

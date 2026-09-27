@@ -29,6 +29,7 @@ export function emptyState(dataDir: string): AppState {
     version: 2,
     settings: defaultSettings(dataDir),
     agents: [],
+    projects: [],
     chats: [],
     messages: [],
     inbox: [],
@@ -54,6 +55,7 @@ export class Store {
     try {
       const raw = JSON.parse(fs.readFileSync(this.file, 'utf8'));
       if (raw.version !== 2) return fresh; // pre-release format: start over
+      for (const c of raw.chats ?? []) c.projectId ??= '';
       return { ...fresh, ...raw, settings: { ...fresh.settings, ...raw.settings }, usage: { ...fresh.usage, ...raw.usage } };
     } catch {
       return fresh;

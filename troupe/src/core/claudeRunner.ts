@@ -15,6 +15,10 @@ export interface TurnRequest {
   prompt: string;
   model: string;
   capability: Capability;
+  /** Also give read-only file tools (project chats). Adds ~2.6k tokens per turn. */
+  readFiles?: boolean;
+  /** Extra folders the agent may access besides cwd. */
+  addDirs?: string[];
   /** Replace Claude Code's default system prompt and skip skills, settings files and MCP servers. */
   lean: boolean;
 }
@@ -50,17 +54,20 @@ export interface Runner {
 }
 
 const WEB = ['WebSearch', 'WebFetch'];
-const FILES = ['Read', 'Glob', 'Grep', 'Edit', 'Write'];
+const READ = ['Read', 'Glob', 'Grep'];
+const FILES = [...READ, 'Edit', 'Write'];
 
 /** Built-in Claude Code tools and auto-approved tools for each capability. */
-export function toolArgs(cap: Capability): string[] {
+export function toolArgs(cap: Capability, readFiles = false): string[] {
+  const allow = (tools: string[]) => (tools.length ? ['--tools', tools.join(','), '--allowedTools', tools.join(',')] : ['--tools', '']);
+  const read = readFiles ? READ : [];
   switch (cap) {
     case 'chat':
-      return ['--tools', ''];
+      return allow(read);
     case 'web':
-      return ['--tools', WEB.join(','), '--allowedTools', WEB.join(',')];
+      return allow([...WEB, ...read]);
     case 'files':
-      return ['--tools', [...FILES, ...WEB].join(','), '--permission-mode', 'acceptEdits', '--allowedTools', [...FILES, ...WEB].join(',')];
+      return [...allow([...FILES, ...WEB]), '--permission-mode', 'acceptEdits'];
     case 'full':
       return ['--dangerously-skip-permissions'];
   }
@@ -76,7 +83,8 @@ export function buildArgs(req: TurnRequest): string[] {
     args.push('--append-system-prompt', req.systemPrompt);
   }
   if (req.model) args.push('--model', req.model);
-  args.push(...toolArgs(req.capability));
+  args.push(...toolArgs(req.capability, req.readFiles));
+  if (req.addDirs?.length) args.push('--add-dir', ...req.addDirs);
   return args;
 }
 

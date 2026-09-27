@@ -1,10 +1,11 @@
-import { contextBridge, ipcRenderer } from 'electron';
+import { contextBridge, ipcRenderer, webUtils } from 'electron';
 import type { TroupeApi } from '../shared/types';
 
 const call = (method: string) => (...args: unknown[]) => ipcRenderer.invoke('troupe', method, ...args);
 const methods = [
-  'getState', 'getLive', 'addAgent', 'updateAgent', 'removeAgent', 'newChat', 'setChatTarget', 'renameChat',
-  'deleteChat', 'sendMessage', 'stopChat', 'updateSettings', 'checkClaude', 'chooseDirectory',
+  'getState', 'getLive', 'addAgent', 'updateAgent', 'removeAgent', 'newChat', 'moveChat', 'setChatTarget', 'renameChat',
+  'deleteChat', 'sendMessage', 'stopChat', 'updateSettings', 'checkClaude', 'chooseDirectory', 'chooseDirectories',
+  'createProject', 'updateProject', 'deleteProject', 'showInFinder',
 ] as const;
 
 const api = Object.fromEntries(methods.map((m) => [m, call(m)])) as unknown as TroupeApi;
@@ -15,5 +16,6 @@ const listen = (channel: string) => (cb: (v: any) => void) => {
 };
 api.onState = listen('state');
 api.onLive = listen('live');
+api.pathForFile = (file) => webUtils.getPathForFile(file);
 
 contextBridge.exposeInMainWorld('troupe', api);

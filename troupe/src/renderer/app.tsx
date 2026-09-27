@@ -1,6 +1,6 @@
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { createRoot } from 'react-dom/client';
-import type { Agent, AgentDraft, AppState, Capability, Chat, LiveStatus, Message, TroupeApi } from '../shared/types';
+import type { Agent, AgentDraft, AppState, Capability, Chat, LiveStatus, Message, Project, ProjectReadAccess, TroupeApi } from '../shared/types';
 import { SYSTEM_ID, USER_ID } from '../shared/types';
 import { EMOJIS, PRESETS, SUGGESTIONS } from './templates';
 
@@ -105,6 +105,8 @@ function App() {
   const [state, setState] = useState<AppState | null>(null);
   const [live, setLive] = useState<LiveStatus[]>([]);
   const [chatId, setChatId] = useState('');
+  /** Id of the project whose page is open, or "" when a chat is shown. */
+  const [projectPage, setProjectPage] = useState('');
   const [editing, setEditing] = useState<Agent | 'new' | null>(null);
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [toast, setToast] = useState('');
@@ -140,7 +142,21 @@ function App() {
     if (!c) return;
     setState(await api.getState());
     setChatId(c.id);
+    setProjectPage('');
+    return c;
   };
+  const showChat = (id: string) => {
+    setChatId(id);
+    setProjectPage('');
+  };
+
+  // Dropping a file anywhere must not navigate the window away.
+  useEffect(() => {
+    const stop = (e: DragEvent) => e.preventDefault();
+    window.addEventListener('dragover', stop);
+    window.addEventListener('drop', stop);
+    return () => (window.removeEventListener('dragover', stop), window.removeEventListener('drop', stop));
+  }, []);
 
   // Open the most recent chat, or make one.
   useEffect(() => {
@@ -149,7 +165,16 @@ function App() {
     else openChat(() => api.newChat('group'));
   }, [state, chat, chats]);
 
-  const newChat = () => openChat(() => api.newChat(chat?.target ?? 'group'));
+  const newChat = () => openChat(() => api.newChat(chat?.target ?? 'group', projectPage || chat?.projectId || ''));
+
+  const createProject = async (folders: string[] | null) => {
+    const dirs = folders ?? (await api.chooseDirectories());
+    if (!dirs.length) return;
+    const p = await run(() => api.createProject('', dirs));
+    if (!p) return;
+    setState(await api.getState());
+    setProjectPage(p.id);
+  };
 
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
@@ -165,8 +190,11 @@ function App() {
   if (!state || !chat) return <div className="loading">◆</div>;
 
   const hasMessages = (c: Chat) => state.messages.some((m) => m.chatId === c.id);
+  const openProject = state.projects.find((p) => p.id === projectPage);
+  const activeProjectId = openProject?.id ?? chat.projectId;
+  const projects = [...state.projects].sort((a, b) => a.name.localeCompare(b.name));
   const grouped: [string, Chat[]][] = [];
-  for (const c of chats.filter(hasMessages)) {
+  for (const c of chats.filter((c) => hasMessages(c) && !c.projectId)) {
     const g = dayGroup(c.updatedAt);
     const last = grouped.at(-1);
     if (last && last[0] === g) last[1].push(c);
@@ -180,14 +208,57 @@ function App() {
           <span className="logo">◆</span> Troupe
         </div>
         <button className="new-chat" onClick={newChat}>
-          <span>✎</span> New chat <kbd>⌘N</kbd>
+          <span>✎</span>
+          <span className="new-chat-label">New chat{activeProjectId ? ` in ${state.projects.find((p) => p.id === activeProjectId)?.name ?? 'project'}` : ''}</span>
+          <kbd>⌘N</kbd>
         </button>
         <nav className="history">
+          <div
+            className="projects"
+            onDragOver={(e) => e.preventDefault()}
+            onDrop={(e) => {
+              e.preventDefault();
+              const paths = Array.from(e.dataTransfer.files).map((f) => api.pathForFile(f)).filter(Boolean);
+              if (paths.length) createProject(paths);
+            }}
+          >
+            <div className="group-label row">
+              Projects
+              <button className="mini" title="New project from a folder" onClick={() => createProject(null)}>
+                +
+              </button>
+            </div>
+            {!projects.length && (
+              <button className="hist hint-row" onClick={() => createProject(null)}>
+                Attach a folder to start a project, or drop one here
+              </button>
+            )}
+            {projects.map((p) => {
+              const pChats = chats.filter((c) => c.projectId === p.id && hasMessages(c));
+              const open = activeProjectId === p.id;
+              return (
+                <div key={p.id}>
+                  <div className={`hist project ${projectPage === p.id ? 'active' : ''}`} onClick={() => setProjectPage(p.id)}>
+                    <span className="folder-ico">{open ? '📂' : '📁'}</span>
+                    <span className="hist-title">{p.name}</span>
+                    {live.some((l) => pChats.some((c) => c.id === l.chatId)) && <span className="hist-live" />}
+                  </div>
+                  {open &&
+                    pChats.slice(0, 6).map((c) => (
+                      <div key={c.id} className={`hist nested ${!projectPage && c.id === chat.id ? 'active' : ''}`} onClick={() => showChat(c.id)}>
+                        <span className="hist-title">{c.title}</span>
+                        {live.some((l) => l.chatId === c.id) && <span className="hist-live" />}
+                      </div>
+                    ))}
+                </div>
+              );
+            })}
+          </div>
           {grouped.map(([g, cs]) => (
             <div key={g}>
               <div className="group-label">{g}</div>
               {cs.map((c) => (
-                <div key={c.id} className={`hist ${c.id === chat.id ? 'active' : ''}`} onClick={() => setChatId(c.id)}>
+                <div key={c.id} className={`hist ${!projectPage && c.id === chat.id ? 'active' : ''}`} onClick={() => showChat(c.id)}>
                   <span className="hist-title">{c.title}</span>
                   {live.some((l) => l.chatId === c.id) && <span className="hist-live" />}
                   <button className="hist-del" title="Delete chat" onClick={(e) => (e.stopPropagation(), confirm('Delete this chat?') && run(() => api.deleteChat(c.id)))}>
@@ -203,10 +274,27 @@ function App() {
       </aside>
 
       <main>
-        <TopBar state={state} chat={chat} live={live} run={run} edit={setEditing} />
-        <Thread state={state} chat={chat} live={live} send={(t) => run(() => api.sendMessage(chat.id, t))} />
-        <PauseBar state={state} run={run} />
-        <Composer state={state} chat={chat} live={live} run={run} />
+        {openProject ? (
+          <ProjectPage
+            key={openProject.id}
+            state={state}
+            project={openProject}
+            run={run}
+            openChat={showChat}
+            startChat={async (text) => {
+              const c = await openChat(() => api.newChat('group', openProject.id));
+              if (c) run(() => api.sendMessage(c.id, text));
+            }}
+            closed={() => setProjectPage('')}
+          />
+        ) : (
+          <>
+            <TopBar state={state} chat={chat} live={live} run={run} edit={setEditing} openProject={setProjectPage} />
+            <Thread state={state} chat={chat} live={live} send={(t) => run(() => api.sendMessage(chat.id, t))} />
+            <PauseBar state={state} run={run} />
+            <Composer state={state} chat={chat} live={live} run={run} />
+          </>
+        )}
       </main>
 
       {editing && <AgentDialog state={state} agent={editing === 'new' ? null : editing} close={() => setEditing(null)} run={run} />}
@@ -218,7 +306,8 @@ function App() {
 
 // ------------------------------------------------------------------ top bar: who you're talking to
 
-function TopBar({ state, chat, live, run, edit }: { state: AppState; chat: Chat; live: LiveStatus[]; run: <T>(f: () => Promise<T>) => Promise<T | undefined>; edit: (a: Agent | 'new') => void }) {
+function TopBar({ state, chat, live, run, edit, openProject }: { state: AppState; chat: Chat; live: LiveStatus[]; run: <T>(f: () => Promise<T>) => Promise<T | undefined>; edit: (a: Agent | 'new') => void; openProject: (id: string) => void }) {
+  const project = state.projects.find((p) => p.id === chat.projectId);
   const lead = state.agents.find((a) => a.isLead);
   const target = chat.target === 'group' || !state.agents.some((a) => a.id === chat.target) ? 'group' : chat.target;
   const busy = (id: string) => live.some((l) => l.agentId === id);
@@ -245,6 +334,25 @@ function TopBar({ state, chat, live, run, edit }: { state: AppState; chat: Chat;
           +
         </button>
       </div>
+      <div className="spacer" />
+      {project && (
+        <button className="project-chip" onClick={() => openProject(project.id)} title={project.folders.join('\n')}>
+          📁 {project.name}
+        </button>
+      )}
+      {state.projects.length > 0 && (
+        <select className="move-select" value={chat.projectId} onChange={(e) => run(() => api.moveChat(chat.id, e.target.value))} title="Move this chat to a project">
+          {project ? <option value={project.id}>Move…</option> : <option value="">Add to project…</option>}
+          {state.projects
+            .filter((p) => p.id !== chat.projectId)
+            .map((p) => (
+              <option key={p.id} value={p.id}>
+                {project ? `Move to ${p.name}` : p.name}
+              </option>
+            ))}
+          {project && <option value="">Remove from project</option>}
+        </select>
+      )}
     </header>
   );
 }
@@ -457,6 +565,157 @@ function PauseBar({ state, run }: { state: AppState; run: <T>(f: () => Promise<T
     <div className="pausebar">
       <span>{why} Queued messages are kept.</span>
       <button onClick={() => run(() => api.updateSettings({ paused: false }))}>Resume now</button>
+    </div>
+  );
+}
+
+// ------------------------------------------------------------------ project page
+
+const ACCESS: { value: ProjectReadAccess; label: string; help: string }[] = [
+  { value: 'lead', label: 'Only the lead', help: 'The lead can open files; others ask the lead. Adds ~2.6k tokens to the lead\'s turns.' },
+  { value: 'all', label: 'Everyone', help: 'Every agent can open files. Adds ~2.6k tokens to every agent turn in this project.' },
+  { value: 'none', label: 'Nobody (lightest)', help: 'Agents only see the folder paths and the instructions below.' },
+];
+
+function ProjectPage(p: {
+  state: AppState;
+  project: Project;
+  run: <T>(f: () => Promise<T>) => Promise<T | undefined>;
+  openChat: (id: string) => void;
+  startChat: (text: string) => void;
+  closed: () => void;
+}) {
+  const { state, project, run } = p;
+  const [name, setName] = useState(project.name);
+  const [instructions, setInstructions] = useState(project.instructions);
+  const [text, setText] = useState('');
+  const [dragging, setDragging] = useState(false);
+  const chats = state.chats
+    .filter((c) => c.projectId === project.id && state.messages.some((m) => m.chatId === c.id))
+    .sort((a, b) => b.updatedAt - a.updatedAt);
+  const editors = state.agents.filter((a) => a.capability === 'files' || a.capability === 'full');
+  const setFolders = (folders: string[]) => run(() => api.updateProject(project.id, { folders }));
+  const addFolders = async (paths?: string[]) => {
+    const dirs = paths ?? (await api.chooseDirectories());
+    if (dirs.length) setFolders([...project.folders, ...dirs]);
+  };
+  const start = () => {
+    const t = text.trim();
+    if (!t) return;
+    setText('');
+    p.startChat(t);
+  };
+
+  return (
+    <div className="project-page">
+      <header className="topbar drag">
+        <span className="folder-big">📂</span>
+        <input className="title-input" value={name} onChange={(e) => setName(e.target.value)} onBlur={() => name.trim() !== project.name && run(() => api.updateProject(project.id, { name }))} />
+        <div className="spacer" />
+        <button className="danger" onClick={() => confirm(`Delete "${project.name}" and its ${chats.length} chats? Your folders and files are not touched.`) && run(() => api.deleteProject(project.id)).then(p.closed)}>
+          Delete project
+        </button>
+      </header>
+      <div className="project-scroll">
+        <div className="column">
+          <div className="composer start">
+            <textarea
+              rows={2}
+              value={text}
+              placeholder={`Start a chat in ${project.name}…`}
+              onChange={(e) => setText(e.target.value)}
+              onKeyDown={(e) => {
+                if (e.key === 'Enter' && !e.shiftKey && !e.nativeEvent.isComposing) {
+                  e.preventDefault();
+                  start();
+                }
+              }}
+            />
+            <button className="send" disabled={!text.trim()} onClick={start}>
+              ↑
+            </button>
+          </div>
+
+          <section
+            className={`card ${dragging ? 'drop' : ''}`}
+            onDragOver={(e) => (e.preventDefault(), setDragging(true))}
+            onDragLeave={() => setDragging(false)}
+            onDrop={(e) => {
+              e.preventDefault();
+              setDragging(false);
+              addFolders(Array.from(e.dataTransfer.files).map((f) => api.pathForFile(f)).filter(Boolean));
+            }}
+          >
+            <div className="card-head">
+              <h4>Folders</h4>
+              <button onClick={() => addFolders()}>+ Add folder</button>
+            </div>
+            {!project.folders.length && <div className="muted small">No folders yet. Add one or drop it here.</div>}
+            {project.folders.map((f, i) => (
+              <div key={f} className="folder-row">
+                <span>📁</span>
+                <span className="path" title={f}>
+                  {f}
+                </span>
+                {i === 0 && <span className="tag">working folder</span>}
+                <button className="mini" onClick={() => run(() => api.showInFinder(f))}>
+                  Show
+                </button>
+                <button className="mini" title="Detach (files are not deleted)" onClick={() => setFolders(project.folders.filter((x) => x !== f))}>
+                  ×
+                </button>
+              </div>
+            ))}
+            <div className="field-row">
+              <label>
+                Who can open files
+                <select value={project.readAccess} onChange={(e) => run(() => api.updateProject(project.id, { readAccess: e.target.value as ProjectReadAccess }))}>
+                  {ACCESS.map((a) => (
+                    <option key={a.value} value={a.value}>
+                      {a.label}
+                    </option>
+                  ))}
+                </select>
+              </label>
+              <div className="muted small">
+                {ACCESS.find((a) => a.value === project.readAccess)?.help}
+                {editors.length > 0 && ` ${editors.map((a) => a.name).join(', ')} can also edit files (their "Can use" setting).`}
+              </div>
+            </div>
+          </section>
+
+          <section className="card">
+            <div className="card-head">
+              <h4>Instructions</h4>
+              {instructions !== project.instructions && (
+                <button className="primary" onClick={() => run(() => api.updateProject(project.id, { instructions }))}>
+                  Save
+                </button>
+              )}
+            </div>
+            <textarea
+              rows={5}
+              value={instructions}
+              onChange={(e) => setInstructions(e.target.value)}
+              onBlur={() => instructions !== project.instructions && run(() => api.updateProject(project.id, { instructions }))}
+              placeholder="What is this project? Goals, conventions, tone, key files to look at… Every agent reads this in this project's chats, so keep it short."
+            />
+          </section>
+
+          <section className="card">
+            <div className="card-head">
+              <h4>Chats</h4>
+            </div>
+            {!chats.length && <div className="muted small">No chats yet. Start one above.</div>}
+            {chats.map((c) => (
+              <button key={c.id} className="chat-row" onClick={() => p.openChat(c.id)}>
+                <span>{c.title}</span>
+                <span className="muted small">{new Date(c.updatedAt).toLocaleDateString([], { month: 'short', day: 'numeric' })}</span>
+              </button>
+            ))}
+          </section>
+        </div>
+      </div>
     </div>
   );
 }

@@ -58,7 +58,7 @@ claude -p --output-format stream-json --verbose
 | Claude Code base (with `--system-prompt`, no tools) | ~800 tokens |
 | Persona + roster + rules | ~150–300 tokens |
 | New messages since the agent's last turn | ≤12 messages × ≤1,500 chars |
-| Tool definitions | 0 for chat-only agents; ~1.6k for web search |
+| Tool definitions | 0 for chat-only agents; ~1.6k for web search; ~2.6k for read-only file access (projects) |
 
 Measured: a chat-only turn is about 900 input tokens in lean mode, against about 4,050 with Claude Code's default prompt.
 
@@ -69,6 +69,11 @@ Measured: a chat-only turn is about 900 input tokens in lean mode, against about
 - [x] Orchestrator: per-chat sessions, @mention routing, wait-for-all answers, hop limit, concurrency limit
 - [x] Lean mode, daily turn cap, auto-pause on 5-hour usage (auto-resume at reset), usage meter
 - [x] Unit tests (fake runner), real CLI end-to-end, UI driven in Electron
+
+**v0.3: Projects**
+- [x] Projects with attached folders (first = working directory, the rest via `--add-dir`), shared instructions and per-project file access (lead / everyone / nobody)
+- [x] Project page: start a chat, manage folders (add, drop, show in Finder, detach), instructions, chat list; projects and their chats in the sidebar
+- [x] Move chats between projects; agents are re-briefed once when folders or instructions change; missing folders are reported instead of run
 
 **Next**
 - Menu-bar quick chat with a global hotkey

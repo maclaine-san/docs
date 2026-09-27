@@ -61,13 +61,22 @@ async function main() {
   orch.on('state', pushState);
   orch.on('live', (l) => win?.webContents.send('live', l));
 
-  const api: Omit<TroupeApi, 'onState' | 'onLive'> = {
+  const api: Omit<TroupeApi, 'onState' | 'onLive' | 'pathForFile'> = {
     getState: async () => snapshot(),
     getLive: async () => orch.getLive(),
     addAgent: async (d) => orch.addAgent(d),
     updateAgent: async (id, p) => orch.updateAgent(id, p),
     removeAgent: async (id) => orch.removeAgent(id),
-    newChat: async (t) => orch.newChat(t),
+    newChat: async (t, p) => orch.newChat(t, p),
+    moveChat: async (c, p) => orch.moveChat(c, p),
+    createProject: async (n, f) => orch.createProject(n, f),
+    updateProject: async (id, p) => orch.updateProject(id, p),
+    deleteProject: async (id) => orch.deleteProject(id),
+    chooseDirectories: async () => {
+      const r = await dialog.showOpenDialog(win!, { properties: ['openDirectory', 'createDirectory', 'multiSelections'] });
+      return r.canceled ? [] : r.filePaths;
+    },
+    showInFinder: async (p) => void (await shell.openPath(p)),
     setChatTarget: async (c, t) => orch.setChatTarget(c, t),
     renameChat: async (c, t) => orch.renameChat(c, t),
     deleteChat: async (c) => orch.deleteChat(c),

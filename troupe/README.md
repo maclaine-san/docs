@@ -6,9 +6,9 @@ It runs on your **Claude Pro/Max subscription** through the official Claude Code
 
 ![Group chat](docs/chat.png)
 
-| New chat | @mentions | Usage controls |
-|---|---|---|
-| ![](docs/new-chat.png) | ![](docs/mention.png) | ![](docs/settings.png) |
+| Project | Chat in a project | @mentions | Usage controls |
+|---|---|---|---|
+| ![](docs/project.png) | ![](docs/project-chat.png) | ![](docs/mention.png) | ![](docs/settings.png) |
 
 ## Requirements
 
@@ -38,6 +38,12 @@ npm run dist:mac     # optional: unsigned .dmg/.app in release/
 - **Agents talk in the same thread.** When the lead writes "@Scout find X. @Quill draft Y", both work, and the lead waits until *both* have answered before writing one combined reply.
 - **Chats are separate**, as in ChatGPT: a new chat (⌘N) starts every agent with a fresh, small context. The chat history is in the sidebar.
 - **Starter team:** Nova (lead, Sonnet), Scout (web research, Haiku), Quill (writer, Haiku). Add, edit or remove agents with **+**, or click the selected tab (or right-click any tab) to edit that agent.
+- **Projects** group chats around attached folders:
+  - Create one with **+** next to *Projects* (pick one or more folders), or drop a folder on the sidebar.
+  - The first folder is where agents work. Extra folders are shared with them too.
+  - **Instructions** are shared context every agent reads in that project's chats.
+  - **Who can open files** is *only the lead* (default), *everyone*, or *nobody*. Agents whose "Can use" allows files can always edit there.
+  - Move any chat into a project from the menu at the top right. Deleting a project deletes its chats, never your files.
 - **Each agent has:** an emoji, a name, a "who are they?" description, a model, and what they can use. Options are just chat, web search, files in a workspace folder, or everything.
 
 ## Staying light on usage
@@ -52,6 +58,7 @@ All agents share your subscription's limits, so Troupe is built to use as little
 | **Cheap models for helpers** | Helpers default to Haiku. Only the lead uses Sonnet. |
 | **No tool overhead** | Chat-only agents load no tools at all, and teammates are coordinated through plain `@mentions`, not tool calls. |
 | **Guards** | 2 agents at a time, 6 agent-to-agent hops per message from you, 150 turns/day, and an auto-pause at 80% of your 5-hour window, which resumes when it resets. All adjustable in Settings. |
+| **File access only where needed** | File tools cost ~2.6k tokens per turn, so in projects only the lead can open files by default. Agents are told to search (Glob/Grep) before reading, and never to read whole folders. |
 | **Stop button** | Stops everything in the chat immediately. |
 
 The sidebar shows your 5-hour usage (as reported by Claude Code) and today's turn count.

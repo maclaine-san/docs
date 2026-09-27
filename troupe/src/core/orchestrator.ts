@@ -1,11 +1,12 @@
 import { EventEmitter } from 'node:events';
 import { randomUUID } from 'node:crypto';
 import fs from 'node:fs';
-import type { Agent, AgentDraft, AppState, Chat, InboxItem, LiveStatus, Message, Seat, Settings } from '../shared/types';
+import type { Agent, AgentDraft, AppState, Chat, InboxItem, LiveStatus, Message, Project, Seat, Settings } from '../shared/types';
+import path from 'node:path';
 import { USER_ID, SYSTEM_ID } from '../shared/types';
 import { today, type Store } from './store';
 import type { Runner, TurnHandle } from './claudeRunner';
-import { mentionedAgents, systemPrompt, turnPrompt } from './prompts';
+import { mentionedAgents, systemPrompt, turnPrompt, type ProjectContext } from './prompts';
 
 const NAME_RE = /^[A-Za-z][A-Za-z0-9_-]{0,23}$/;
 const RESERVED = ['user', 'all', 'group', 'everyone', 'troupe', 'system', 'here'];
@@ -197,19 +198,90 @@ export class Orchestrator extends EventEmitter {
     return c;
   }
 
-  newChat(target = 'group'): Chat {
+  newChat(target = 'group', projectId = ''): Chat {
+    if (projectId) this.project(projectId);
     // Reuse an untouched chat rather than piling up empty ones.
-    const empty = this.state.chats.find((c) => !this.state.messages.some((m) => m.chatId === c.id));
+    const empty = this.state.chats.find((c) => c.projectId === projectId && !this.state.messages.some((m) => m.chatId === c.id));
     if (empty) {
       empty.target = target;
       empty.updatedAt = Date.now();
       this.changed();
       return empty;
     }
-    const c: Chat = { id: randomUUID(), title: 'New chat', target, seats: {}, createdAt: Date.now(), updatedAt: Date.now() };
+    const c: Chat = { id: randomUUID(), title: 'New chat', target, projectId, seats: {}, createdAt: Date.now(), updatedAt: Date.now() };
     this.state.chats.push(c);
     this.changed();
     return c;
+  }
+
+  /** Move a chat into a project (or out, with ""). Agents are briefed on the change next turn. */
+  moveChat(chatId: string, projectId: string): void {
+    if (projectId) this.project(projectId);
+    const c = this.chat(chatId);
+    if (c.projectId === projectId) return;
+    c.projectId = projectId;
+    for (const seat of Object.values(c.seats)) seat.projectVersion = -1;
+    this.changed();
+  }
+
+  // ---------------------------------------------------------------- projects
+
+  private project(id: string): Project {
+    const p = this.state.projects.find((x) => x.id === id);
+    if (!p) throw new UserError('That project no longer exists.');
+    return p;
+  }
+
+  private checkFolders(folders: string[]): string[] {
+    const out: string[] = [];
+    for (const f of folders) {
+      const abs = path.resolve(f);
+      let ok = false;
+      try {
+        ok = fs.statSync(abs).isDirectory();
+      } catch {
+        /* reported below */
+      }
+      if (!ok) throw new UserError(`${abs} is not a folder.`);
+      if (!out.includes(abs)) out.push(abs);
+    }
+    return out;
+  }
+
+  createProject(name: string, folders: string[] = []): Project {
+    const dirs = this.checkFolders(folders);
+    const p: Project = {
+      id: randomUUID(),
+      name: name.trim() || (dirs[0] ? path.basename(dirs[0]) : 'New project'),
+      folders: dirs,
+      instructions: '',
+      readAccess: 'lead',
+      version: 1,
+      createdAt: Date.now(),
+      updatedAt: Date.now(),
+    };
+    this.state.projects.push(p);
+    this.changed();
+    return p;
+  }
+
+  updateProject(id: string, patch: Partial<Pick<Project, 'name' | 'folders' | 'instructions' | 'readAccess'>>): void {
+    const p = this.project(id);
+    if (patch.name !== undefined) p.name = patch.name.trim() || p.name;
+    if (patch.folders !== undefined) p.folders = this.checkFolders(patch.folders);
+    if (patch.instructions !== undefined) p.instructions = patch.instructions;
+    if (patch.readAccess !== undefined) p.readAccess = patch.readAccess;
+    if (patch.folders !== undefined || patch.instructions !== undefined || patch.readAccess !== undefined) p.version++;
+    p.updatedAt = Date.now();
+    this.changed();
+  }
+
+  /** Deletes the project and its chats. Never touches the folders on disk. */
+  deleteProject(id: string): void {
+    this.project(id);
+    for (const c of this.state.chats.filter((x) => x.projectId === id)) this.deleteChat(c.id);
+    this.state.projects = this.state.projects.filter((p) => p.id !== id);
+    this.changed();
   }
 
   setChatTarget(chatId: string, target: string): void {
@@ -367,7 +439,25 @@ export class Orchestrator extends EventEmitter {
     const depth = triggers.reduce((d, m) => Math.max(d, m.depth), 0);
     const askers = [...new Set(items.map((i) => i.askedBy).filter((x): x is string => Boolean(x)))];
     const settings = this.state.settings;
-    const cwd = settings.workspaceDir;
+
+    const project = this.state.projects.find((p) => p.id === chat.projectId);
+    let ctx: ProjectContext | undefined;
+    let cwd = settings.workspaceDir;
+    if (project) {
+      const missing = project.folders.filter((f) => !fs.existsSync(f));
+      if (missing.length) {
+        this.note(chatId, `Can't find ${missing.join(', ')}. Re-attach the folder in the project settings, then send your message again.`);
+        this.release(chatId, agentId, askers, null);
+        this.changed();
+        return;
+      }
+      const canEdit = agent.capability === 'files' || agent.capability === 'full';
+      const canRead = canEdit || project.readAccess === 'all' || (project.readAccess === 'lead' && agent.isLead);
+      ctx = { project, canRead, canEdit };
+      if (project.folders[0]) cwd = project.folders[0];
+    }
+    const projectChanged = Boolean(ctx) && seat.started && seat.projectVersion !== project!.version;
+    if (project) seat.projectVersion = project.version;
     try {
       fs.mkdirSync(cwd, { recursive: true });
     } catch {
@@ -384,10 +474,12 @@ export class Orchestrator extends EventEmitter {
         env: this.env.childEnv(),
         sessionId: seat.sessionId,
         resume: seat.started,
-        systemPrompt: systemPrompt(this.state, agent, cwd),
-        prompt: turnPrompt(this.state, agent, unseen, triggers.map((m) => m.from), teamChanged),
+        systemPrompt: systemPrompt(this.state, agent, cwd, ctx),
+        prompt: turnPrompt(this.state, agent, unseen, triggers.map((m) => m.from), teamChanged, projectChanged ? ctx : undefined),
         model: agent.model,
         capability: agent.capability,
+        readFiles: Boolean(ctx?.canRead && !ctx.canEdit),
+        addDirs: project?.folders.slice(1),
         lean: settings.leanMode,
       },
       {
