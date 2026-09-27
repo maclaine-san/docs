@@ -6,9 +6,13 @@ It runs on your **Claude Pro/Max subscription** through the official Claude Code
 
 ![Group chat](docs/chat.png)
 
-| Project | Chat in a project | @mentions | Usage controls |
-|---|---|---|---|
-| ![](docs/project.png) | ![](docs/project-chat.png) | ![](docs/mention.png) | ![](docs/settings.png) |
+| Menu-bar quick chat (⌥Space) | @file mentions | Project |
+|---|---|---|
+| ![](docs/quick-chat.png) | ![](docs/file-mention.png) | ![](docs/project.png) |
+
+| Chat in a project | @mentions | Usage controls |
+|---|---|---|
+| ![](docs/project-chat.png) | ![](docs/mention.png) | ![](docs/settings.png) |
 
 ## Requirements
 
@@ -44,6 +48,17 @@ npm run dist:mac     # optional: unsigned .dmg/.app in release/
   - **Instructions** are shared context every agent reads in that project's chats.
   - **Who can open files** is *only the lead* (default), *everyone*, or *nobody*. Agents whose "Can use" allows files can always edit there.
   - Move any chat into a project from the menu at the top right. Deleting a project deletes its chats, never your files.
+- **@files:** in a project chat, type `@` to pick a file, e.g. `@docs/brief.md`. You can also drop any file onto the message box.
+  - The file's current contents go into that message for the agents who read it, once.
+  - Agents don't need file tools for this, so it's much cheaper than letting them browse, and it works even when a project's access is set to "nobody".
+  - Files are capped at 30k characters each and 60k per turn. Binary files are skipped.
+- **Menu-bar quick chat:**
+  - Press **⌥Space** anywhere, or click the ◆ in the menu bar, for a small floating chat like Spotlight.
+  - Messages go to the group (or pick an agent). **Esc** hides it and **⌘N** starts fresh. It picks up your last quick chat for 3 hours.
+  - **↗ Open** moves the chat into the main window.
+  - Troupe keeps running in the menu bar when you close the window. Quit from the ◆ menu, which also shows usage and pause/resume.
+  - You get a notification when an agent replies while Troupe is in the background.
+  - Change or turn off the shortcut in Settings.
 - **Each agent has:** an emoji, a name, a "who are they?" description, a model, and what they can use. Options are just chat, web search, files in a workspace folder, or everything.
 
 ## Staying light on usage
@@ -58,6 +73,8 @@ All agents share your subscription's limits, so Troupe is built to use as little
 | **Cheap models for helpers** | Helpers default to Haiku. Only the lead uses Sonnet. |
 | **No tool overhead** | Chat-only agents load no tools at all, and teammates are coordinated through plain `@mentions`, not tool calls. |
 | **Guards** | 2 agents at a time, 6 agent-to-agent hops per message from you, 150 turns/day, and an auto-pause at 80% of your 5-hour window, which resumes when it resets. All adjustable in Settings. |
+| **@files instead of file tools** | Mentioning a file inlines just that file, once, with no tool definitions and no extra round trips. |
+| **Careful @mentions** | Agents are told that `@Name` wakes a teammate immediately, so they don't write "I could ask @Scout" and wake Scout by accident. A vague request now takes 1 turn instead of 3 (tested 3/3). |
 | **File access only where needed** | File tools cost ~2.6k tokens per turn, so in projects only the lead can open files by default. Agents are told to search (Glob/Grep) before reading, and never to read whole folders. |
 | **Stop button** | Stops everything in the chat immediately. |
 

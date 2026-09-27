@@ -26,4 +26,5 @@ if (tests) {
   ]);
   fs.copyFileSync('src/renderer/index.html', 'dist/index.html');
   fs.copyFileSync('src/renderer/styles.css', 'dist/styles.css');
+  for (const f of fs.readdirSync('assets')) fs.copyFileSync(`assets/${f}`, `dist/${f}`);
 }

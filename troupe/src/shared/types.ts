@@ -62,6 +62,8 @@ export interface Chat {
   /** Project this chat belongs to, or "". */
   projectId: string;
   seats: Record<string, Seat>;
+  /** Started from the menu-bar quick chat. */
+  quick?: boolean;
   createdAt: number;
   updatedAt: number;
 }
@@ -75,6 +77,8 @@ export interface Message {
   ts: number;
   /** Hops away from a human message. Used to stop runaway agent loops. */
   depth: number;
+  /** Files @mentioned in the message (absolute paths). Their contents are inlined for agents. */
+  files?: string[];
 }
 
 /** A pending delivery: `agentId` should read `messageId` in `chatId` on its next turn. */
@@ -107,6 +111,10 @@ export interface Settings {
   usagePauseAt: number;
   paused: boolean;
   pauseReason: PauseReason;
+  /** Global shortcut for the menu-bar quick chat (Electron accelerator), "" = off. */
+  quickShortcut: string;
+  /** Notify when an agent replies while Troupe isn't in front. */
+  notifications: boolean;
 }
 
 export interface UsageWindow {
@@ -157,7 +165,9 @@ export interface TroupeApi {
   addAgent(draft: AgentDraft): Promise<Agent>;
   updateAgent(id: string, patch: Partial<AgentDraft>): Promise<void>;
   removeAgent(id: string): Promise<void>;
-  newChat(target: string, projectId?: string): Promise<Chat>;
+  newChat(target: string, projectId?: string, quick?: boolean): Promise<Chat>;
+  /** Files matching `query` in the chat's project, for @mention autocomplete. */
+  searchFiles(chatId: string, query: string): Promise<{ label: string; insert: string }[]>;
   moveChat(chatId: string, projectId: string): Promise<void>;
   createProject(name: string, folders: string[]): Promise<Project>;
   updateProject(id: string, patch: Partial<Pick<Project, 'name' | 'folders' | 'instructions' | 'readAccess'>>): Promise<void>;
@@ -167,6 +177,15 @@ export interface TroupeApi {
   /** Absolute path of a dropped file or folder. */
   pathForFile(file: File): string;
   showInFinder(path: string): Promise<void>;
+  /** Show the main window on a chat (from the quick window or a notification). */
+  openInMain(chatId: string): Promise<void>;
+  hideQuick(): Promise<void>;
+  /** Whether the quick-chat shortcut is registered. */
+  shortcutStatus(): Promise<{ accelerator: string; ok: boolean }>;
+  /** Main window: open this chat. */
+  onOpenChat(cb: (chatId: string) => void): () => void;
+  /** Quick window: it was just shown, optionally for a specific chat. */
+  onQuickShown(cb: (chatId: string) => void): () => void;
   setChatTarget(chatId: string, target: string): Promise<void>;
   renameChat(chatId: string, title: string): Promise<void>;
   deleteChat(chatId: string): Promise<void>;

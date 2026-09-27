@@ -75,9 +75,13 @@ Measured: a chat-only turn is about 900 input tokens in lean mode, against about
 - [x] Project page: start a chat, manage folders (add, drop, show in Finder, detach), instructions, chat list; projects and their chats in the sidebar
 - [x] Move chats between projects; agents are re-briefed once when folders or instructions change; missing folders are reported instead of run
 
+**v0.4: @files and the menu bar**
+- [x] `@file` mentions: autocomplete from project folders, drag and drop of any file, contents inlined once per agent (30k chars per file, 60k per turn), binary files skipped, path traversal blocked, unknown files reported
+- [x] Menu-bar ◆ with a menu (quick chat, open, usage, pause, quit). Global shortcut (⌥Space by default, configurable) opens a floating quick chat. Esc hides it, ⌘N starts fresh, ↗ opens it in the main window. It stays alive when the window is closed.
+- [x] Notifications when an agent replies while Troupe is in the background; clicking one opens the chat
+- [x] Prompt fix: `@Name` is only used to hand off work now, so conditional mentions no longer wake teammates
+
 **Next**
-- Menu-bar quick chat with a global hotkey
-- Notifications when a long answer finishes
 - Attach files and images to a message
 - Voice input
 - "Remember this" memory notes per agent that carry across chats (small, capped)

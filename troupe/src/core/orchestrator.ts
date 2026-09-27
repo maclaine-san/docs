@@ -7,6 +7,7 @@ import { USER_ID, SYSTEM_ID } from '../shared/types';
 import { today, type Store } from './store';
 import type { Runner, TurnHandle } from './claudeRunner';
 import { mentionedAgents, systemPrompt, turnPrompt, type ProjectContext } from './prompts';
+import { displayLabel, FILE_CHARS, mentionToken, parseFileMentions, readForPrompt, resolveMention, searchFiles, TURN_FILE_CHARS, type FileContent } from './files';
 
 const NAME_RE = /^[A-Za-z][A-Za-z0-9_-]{0,23}$/;
 const RESERVED = ['user', 'all', 'group', 'everyone', 'troupe', 'system', 'here'];
@@ -198,10 +199,12 @@ export class Orchestrator extends EventEmitter {
     return c;
   }
 
-  newChat(target = 'group', projectId = ''): Chat {
+  newChat(target = 'group', projectId = '', quick = false): Chat {
     if (projectId) this.project(projectId);
     // Reuse an untouched chat rather than piling up empty ones.
-    const empty = this.state.chats.find((c) => c.projectId === projectId && !this.state.messages.some((m) => m.chatId === c.id));
+    const empty = this.state.chats.find(
+      (c) => c.projectId === projectId && Boolean(c.quick) === quick && !this.state.messages.some((m) => m.chatId === c.id),
+    );
     if (empty) {
       empty.target = target;
       empty.updatedAt = Date.now();
@@ -209,6 +212,7 @@ export class Orchestrator extends EventEmitter {
       return empty;
     }
     const c: Chat = { id: randomUUID(), title: 'New chat', target, projectId, seats: {}, createdAt: Date.now(), updatedAt: Date.now() };
+    if (quick) c.quick = true;
     this.state.chats.push(c);
     this.changed();
     return c;
@@ -325,6 +329,7 @@ export class Orchestrator extends EventEmitter {
     const msg: Message = { id: randomUUID(), chatId, from, text, ts, depth };
     this.state.messages.push(msg);
     chat.updatedAt = ts;
+    if (from !== USER_ID && from !== SYSTEM_ID) this.emit('message', msg);
     return msg;
   }
 
@@ -332,11 +337,34 @@ export class Orchestrator extends EventEmitter {
     this.post(chatId, SYSTEM_ID, text, 0);
   }
 
+  private folders(chat: Chat): string[] {
+    return this.state.projects.find((p) => p.id === chat.projectId)?.folders ?? [];
+  }
+
+  /** @mention autocomplete: files in the chat's project. */
+  searchFiles(chatId: string, query: string): { label: string; insert: string }[] {
+    const folders = this.folders(this.chat(chatId));
+    if (!folders.length) return [];
+    return searchFiles(folders, query).map((h) => ({ label: h.label, insert: mentionToken(h.label) }));
+  }
+
   userMessage(chatId: string, text: string): void {
     const t = text.trim();
     if (!t) return;
     const chat = this.chat(chatId);
+    const folders = this.folders(chat);
+    const files: string[] = [];
+    const unknown: string[] = [];
+    for (const tok of parseFileMentions(t)) {
+      const abs = resolveMention(tok, folders);
+      if (abs) files.push(abs);
+      else unknown.push(tok);
+    }
     const msg = this.post(chatId, USER_ID, t, 0);
+    if (files.length) msg.files = [...new Set(files)];
+    if (unknown.length) {
+      this.note(chatId, `Couldn't find ${unknown.map((u) => `\`${u}\``).join(', ')}${folders.length ? ' in this project' : ''}, so ${unknown.length > 1 ? "they weren't" : "it wasn't"} attached.`);
+    }
     if (chat.title === 'New chat') chat.title = t.replace(/\s+/g, ' ').slice(0, 48) + (t.length > 48 ? '…' : '');
 
     let to = mentionedAgents(this.state, t);
@@ -475,7 +503,7 @@ export class Orchestrator extends EventEmitter {
         sessionId: seat.sessionId,
         resume: seat.started,
         systemPrompt: systemPrompt(this.state, agent, cwd, ctx),
-        prompt: turnPrompt(this.state, agent, unseen, triggers.map((m) => m.from), teamChanged, projectChanged ? ctx : undefined),
+        prompt: turnPrompt(this.state, agent, unseen, triggers.map((m) => m.from), teamChanged, projectChanged ? ctx : undefined, this.attachments(unseen, agent.id, project?.folders ?? [])),
         model: agent.model,
         capability: agent.capability,
         readFiles: Boolean(ctx?.canRead && !ctx.canEdit),
@@ -530,6 +558,29 @@ export class Orchestrator extends EventEmitter {
       this.changed();
       this.schedule();
     });
+  }
+
+  /** Read @mentioned files for the messages this agent is about to see, within the per-turn budget. */
+  private attachments(unseen: Message[], agentId: string, folders: string[]): Map<string, FileContent[]> {
+    const out = new Map<string, FileContent[]>();
+    let budget = TURN_FILE_CHARS;
+    // Newest first, so the message that woke the agent gets its files even if the budget runs out.
+    for (const m of [...unseen].reverse()) {
+      if (!m.files?.length || m.from === agentId) continue;
+      const list: FileContent[] = [];
+      for (const abs of m.files) {
+        const label = displayLabel(abs, folders);
+        if (budget <= 0) {
+          list.push({ label, text: '', truncated: true, binary: false, missing: false });
+          continue;
+        }
+        const f = readForPrompt(abs, label, Math.min(FILE_CHARS, budget));
+        budget -= f.text.length;
+        list.push(f);
+      }
+      out.set(m.id, list);
+    }
+    return out;
   }
 
   /** Route an agent's reply: wake anyone it @mentioned, and hand the answer back to whoever asked. */

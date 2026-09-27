@@ -50,6 +50,7 @@ function renderMarkdown(src: string, agents: Agent[]): string {
             .replace(/(^|[\s(])\*([^*\n]+)\*(?=[\s).,!?]|$)/g, '$1<em>$2</em>')
             .replace(/\[([^\]]+)\]\((https?:[^)\s]+)\)/g, '<a href="$2" target="_blank">$1</a>')
             .replace(/(^|[\s(])(https?:\/\/[^\s<)]+)/g, '$1<a href="$2" target="_blank">$2</a>')
+            .replace(/(^|[\s(])@(?:&quot;([^&\n]+?)&quot;|([\w~.\/-]*[.\/][\w~.\/-]*\w))/g, (_m, pre, q, p) => `${pre}<span class="file-mention">${q ?? p}</span>`)
             .replace(/(^|[\s(])@([A-Za-z][\w-]*)/g, (m, pre, n) => (names.has(n.toLowerCase()) ? `${pre}<span class="mention">@${n}</span>` : m));
         const ul = /^\s*[-*•] (.*)$/.exec(raw);
         const ol = /^\s*\d+[.)] (.*)$/.exec(raw);
@@ -149,6 +150,9 @@ function App() {
     setChatId(id);
     setProjectPage('');
   };
+
+  // Opened from the quick window or a notification.
+  useEffect(() => api.onOpenChat((id) => showChat(id)), []);
 
   // Dropping a file anywhere must not navigate the window away.
   useEffect(() => {
@@ -359,7 +363,7 @@ function TopBar({ state, chat, live, run, edit, openProject }: { state: AppState
 
 // ------------------------------------------------------------------ thread
 
-function Thread({ state, chat, live, send }: { state: AppState; chat: Chat; live: LiveStatus[]; send: (t: string) => void }) {
+function Thread({ state, chat, live, send, compact }: { state: AppState; chat: Chat; live: LiveStatus[]; send: (t: string) => void; compact?: boolean }) {
   const msgs = state.messages.filter((m) => m.chatId === chat.id);
   const working = live.filter((l) => l.chatId === chat.id);
   const ref = useRef<HTMLDivElement>(null);
@@ -372,6 +376,16 @@ function Thread({ state, chat, live, send }: { state: AppState; chat: Chat; live
     stick.current = true;
   }, [chat.id]);
 
+  if (!msgs.length && compact) {
+    const lead = state.agents.find((a) => a.isLead);
+    return (
+      <div className="thread quick-empty">
+        <span className="muted">
+          Ask {lead ? `${lead.name} and the team` : 'the team'} anything. <kbd>esc</kbd> to hide.
+        </span>
+      </div>
+    );
+  }
   if (!msgs.length) {
     const target = state.agents.find((a) => a.id === chat.target);
     const lead = state.agents.find((a) => a.isLead);
@@ -444,7 +458,18 @@ function MessageRow({ state, m, prev }: { state: AppState; m: Message; prev?: Me
   if (m.from === USER_ID) {
     return (
       <div className="msg user">
-        <div className="bubble" dangerouslySetInnerHTML={{ __html: html }} />
+        <div className="user-col">
+          <div className="bubble" dangerouslySetInnerHTML={{ __html: html }} />
+          {m.files?.length ? (
+            <div className="attached">
+              {m.files.map((f) => (
+                <button key={f} className="file-chip" title={`${f}\nClick to show in Finder`} onClick={() => api.showInFinder(f.slice(0, f.lastIndexOf('/')) || '/')}>
+                  📄 {f.split('/').pop()}
+                </button>
+              ))}
+            </div>
+          ) : null}
+        </div>
       </div>
     );
   }
@@ -468,7 +493,7 @@ function MessageRow({ state, m, prev }: { state: AppState; m: Message; prev?: Me
 
 // ------------------------------------------------------------------ composer
 
-function Composer({ state, chat, live, run }: { state: AppState; chat: Chat; live: LiveStatus[]; run: <T>(f: () => Promise<T>) => Promise<T | undefined> }) {
+function Composer({ state, chat, live, run, focusKey = 0 }: { state: AppState; chat: Chat; live: LiveStatus[]; run: <T>(f: () => Promise<T>) => Promise<T | undefined>; focusKey?: number }) {
   const [text, setText] = useState('');
   const [pick, setPick] = useState(0);
   const ta = useRef<HTMLTextAreaElement>(null);
@@ -476,7 +501,7 @@ function Composer({ state, chat, live, run }: { state: AppState; chat: Chat; liv
   const lead = state.agents.find((a) => a.isLead);
   const busy = live.some((l) => l.chatId === chat.id) || state.inbox.some((i) => i.chatId === chat.id);
 
-  useEffect(() => ta.current?.focus(), [chat.id, chat.target]);
+  useEffect(() => ta.current?.focus(), [chat.id, chat.target, focusKey]);
   useLayoutEffect(() => {
     const el = ta.current;
     if (!el) return;
@@ -484,12 +509,32 @@ function Composer({ state, chat, live, run }: { state: AppState; chat: Chat; liv
     el.style.height = Math.min(220, el.scrollHeight) + 'px';
   }, [text]);
 
-  // @mention autocomplete for the word being typed.
-  const m = /(^|\s)@([\w-]*)$/.exec(text);
-  const options = m ? state.agents.filter((a) => a.name.toLowerCase().startsWith(m[2].toLowerCase())) : [];
-  const complete = (a: Agent) => {
-    setText(text.replace(/@([\w-]*)$/, `@${a.name} `));
+  // @mention autocomplete for the word being typed: agents, then files in the chat's project.
+  const m = /(^|\s)@"?([^\s"]*)$/.exec(text);
+  const query = m ? m[2] : null;
+  const [files, setFiles] = useState<{ label: string; insert: string }[]>([]);
+  const inProject = Boolean(chat.projectId);
+  useEffect(() => {
+    if (query === null || !inProject) return setFiles([]);
+    let live = true;
+    const t = setTimeout(() => api.searchFiles(chat.id, query).then((r) => live && setFiles(r)), 80);
+    return () => ((live = false), clearTimeout(t));
+  }, [query, chat.id, inProject]);
+  const agentOptions = query !== null && !/[./]/.test(query) ? state.agents.filter((a) => a.name.toLowerCase().startsWith(query.toLowerCase())) : [];
+  const options: ({ kind: 'agent'; agent: Agent } | { kind: 'file'; label: string; insert: string })[] = [
+    ...agentOptions.map((agent) => ({ kind: 'agent' as const, agent })),
+    ...(query !== null ? files : []).map((f) => ({ kind: 'file' as const, ...f })),
+  ];
+  const complete = (o: (typeof options)[number]) => {
+    const token = o.kind === 'agent' ? o.agent.name : o.insert;
+    setText(text.replace(/@"?[^\s"]*$/, `@${token} `));
     setPick(0);
+    ta.current?.focus();
+  };
+  const insertPaths = (paths: string[]) => {
+    if (!paths.length) return;
+    const tokens = paths.map((p) => (/\s/.test(p) ? `@"${p}"` : `@${p}`)).join(' ');
+    setText((t) => (t && !/\s$/.test(t) ? t + ' ' : t) + tokens + ' ');
     ta.current?.focus();
   };
 
@@ -502,21 +547,38 @@ function Composer({ state, chat, live, run }: { state: AppState; chat: Chat; liv
 
   return (
     <div className="composer-wrap">
-      <div className="composer">
+      <div
+        className="composer"
+        onDragOver={(e) => e.preventDefault()}
+        onDrop={(e) => {
+          e.preventDefault();
+          insertPaths(Array.from(e.dataTransfer.files).map((f) => api.pathForFile(f)).filter(Boolean));
+        }}
+      >
         {options.length > 0 && (
           <div className="mention-menu">
-            {options.map((a, i) => (
-              <button key={a.id} className={i === pick ? 'active' : ''} onMouseDown={(e) => (e.preventDefault(), complete(a))}>
-                <Avatar agent={a} size={22} /> <strong>{a.name}</strong> <span className="muted">{a.persona.slice(0, 60)}</span>
-              </button>
-            ))}
+            {options.map((o, i) =>
+              o.kind === 'agent' ? (
+                <button key={o.agent.id} className={i === pick ? 'active' : ''} onMouseDown={(e) => (e.preventDefault(), complete(o))}>
+                  <Avatar agent={o.agent} size={22} /> <strong>{o.agent.name}</strong> <span className="muted">{o.agent.persona.slice(0, 60)}</span>
+                </button>
+              ) : (
+                <button key={o.label} className={`file-opt ${i === pick ? 'active' : ''}`} onMouseDown={(e) => (e.preventDefault(), complete(o))}>
+                  <span className="file-ico">📄</span> <span className="file-name">{o.label.split('/').pop()}</span>
+                  <span className="muted">{o.label.includes('/') ? o.label.slice(0, o.label.lastIndexOf('/')) : ''}</span>
+                </button>
+              ),
+            )}
           </div>
         )}
         <textarea
           ref={ta}
           rows={1}
           value={text}
-          placeholder={target ? `Message ${target.name}` : lead ? `Message the group (${lead.name} leads) or @mention someone` : 'Add an agent to start'}
+          placeholder={
+            (target ? `Message ${target.name}` : lead ? `Message the group (${lead.name} leads)` : 'Add an agent to start') +
+            (inProject ? '. Type @ for teammates or files' : '. @mention someone, or drop a file')
+          }
           onChange={(e) => setText(e.target.value)}
           onKeyDown={(e) => {
             if (options.length) {
@@ -859,6 +921,33 @@ function AgentDialog({ state, agent, close, run }: { state: AppState; agent: Age
   );
 }
 
+const SHORTCUTS = ['Alt+Space', 'CommandOrControl+Shift+Space', 'CommandOrControl+Alt+Space', 'Control+Space'];
+
+function prettyShortcut(a: string): string {
+  return a.replace('CommandOrControl', '⌘').replace('Alt', '⌥').replace('Shift', '⇧').replace('Control', '⌃').replace(/\+/g, ' ');
+}
+
+function ShortcutSetting({ value, save }: { value: string; save: (v: string) => void }) {
+  const [status, setStatus] = useState<{ ok: boolean } | null>(null);
+  useEffect(() => {
+    api.shortcutStatus().then(setStatus);
+  }, [value]);
+  return (
+    <label>
+      Quick chat shortcut
+      <select value={SHORTCUTS.includes(value) ? value : ''} onChange={(e) => save(e.target.value)}>
+        {SHORTCUTS.map((a) => (
+          <option key={a} value={a}>
+            {prettyShortcut(a)}
+          </option>
+        ))}
+        <option value="">Off (use the ◆ menu-bar icon)</option>
+      </select>
+      <small>{value && status && !status.ok ? `${prettyShortcut(value)} is taken by another app. Pick a different one.` : 'Opens a small chat box over any app, like Spotlight.'}</small>
+    </label>
+  );
+}
+
 function SettingsDialog({ state, close, run }: { state: AppState; close: () => void; run: <T>(f: () => Promise<T>) => Promise<T | undefined> }) {
   const s = state.settings;
   const u = state.usage;
@@ -950,6 +1039,13 @@ function SettingsDialog({ state, close, run }: { state: AppState; close: () => v
           </label>
         </div>
 
+        <h4>Menu bar</h4>
+        <ShortcutSetting value={s.quickShortcut} save={(v) => upd({ quickShortcut: v })} />
+        <label className="check">
+          <input type="checkbox" checked={s.notifications} onChange={(e) => upd({ notifications: e.target.checked })} />
+          <span>Notify me when an agent replies while Troupe is in the background</span>
+        </label>
+
         <h4>Setup</h4>
         <label className="check">
           <input type="checkbox" checked={s.forceSubscription} onChange={(e) => upd({ forceSubscription: e.target.checked })} />
@@ -990,4 +1086,107 @@ function SettingsDialog({ state, close, run }: { state: AppState; close: () => v
   );
 }
 
-createRoot(document.getElementById('root')!).render(<App />);
+// ------------------------------------------------------------------ menu-bar quick chat
+
+/** A quick chat is reused if you come back to it within this long. */
+const QUICK_REUSE_MS = 3 * 60 * 60 * 1000;
+
+function QuickApp() {
+  const [state, setState] = useState<AppState | null>(null);
+  const [live, setLive] = useState<LiveStatus[]>([]);
+  const [chatId, setChatId] = useState('');
+  const [focusKey, setFocusKey] = useState(0);
+  const [toast, setToast] = useState('');
+  const stateRef = useRef<AppState | null>(null);
+  stateRef.current = state;
+
+  const run = async <T,>(fn: () => Promise<T>): Promise<T | undefined> => {
+    try {
+      return await fn();
+    } catch (e) {
+      setToast(errMsg(e));
+    }
+  };
+
+  /** The latest recent quick chat, or a fresh one. */
+  const pickChat = async (force = '') => {
+    if (force) return setChatId(force);
+    const s = stateRef.current ?? (await api.getState());
+    const recent = s.chats.filter((c) => c.quick && Date.now() - c.updatedAt < QUICK_REUSE_MS).sort((a, b) => b.updatedAt - a.updatedAt)[0];
+    const c = recent ?? (await run(() => api.newChat('group', '', true)));
+    if (!c) return;
+    setState(await api.getState());
+    setChatId(c.id);
+  };
+  const fresh = async () => {
+    const c = await run(() => api.newChat('group', '', true));
+    if (!c) return;
+    setState(await api.getState());
+    setChatId(c.id);
+    setFocusKey((k) => k + 1);
+  };
+
+  useEffect(() => {
+    api.getState().then((s) => {
+      setState(s);
+      stateRef.current = s;
+      pickChat();
+    });
+    api.getLive().then(setLive);
+    const a = api.onState(setState);
+    const b = api.onLive(setLive);
+    const c = api.onQuickShown((id) => {
+      pickChat(id);
+      setFocusKey((k) => k + 1);
+    });
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === 'Escape' && !document.querySelector('.mention-menu')) api.hideQuick();
+      if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 'n') {
+        e.preventDefault();
+        fresh();
+      }
+    };
+    window.addEventListener('keydown', onKey);
+    return () => (a(), b(), c(), window.removeEventListener('keydown', onKey));
+  }, []);
+
+  useEffect(() => {
+    if (!toast) return;
+    const t = setTimeout(() => setToast(''), 4000);
+    return () => clearTimeout(t);
+  }, [toast]);
+
+  const chat = state?.chats.find((c) => c.id === chatId);
+  if (!state || !chat) return <div className="quick loading">◆</div>;
+  const hasMessages = state.messages.some((m) => m.chatId === chat.id);
+  return (
+    <div className={`quick ${hasMessages ? '' : 'fresh'}`}>
+      <header className="quick-head drag">
+        <span className="logo">◆</span>
+        <select className="quick-target" value={chat.target} onChange={(e) => run(() => api.setChatTarget(chat.id, e.target.value))}>
+          <option value="group">👥 Group</option>
+          {state.agents.map((a) => (
+            <option key={a.id} value={a.id}>
+              {a.emoji} {a.name}
+            </option>
+          ))}
+        </select>
+        <div className="spacer" />
+        <button className="mini" title="New quick chat (⌘N)" onClick={fresh}>
+          ✎ New
+        </button>
+        <button className="mini" title="Open this chat in the Troupe window" onClick={() => api.openInMain(chat.id)}>
+          ↗ Open
+        </button>
+      </header>
+      <Thread state={state} chat={chat} live={live} send={(t) => run(() => api.sendMessage(chat.id, t))} compact />
+      <PauseBar state={state} run={run} />
+      <Composer state={state} chat={chat} live={live} run={run} focusKey={focusKey} />
+      {toast && <div className="toast">{toast}</div>}
+    </div>
+  );
+}
+
+const isQuick = new URLSearchParams(location.search).get('mode') === 'quick';
+document.body.classList.toggle('quick-mode', isQuick);
+createRoot(document.getElementById('root')!).render(isQuick ? <QuickApp /> : <App />);

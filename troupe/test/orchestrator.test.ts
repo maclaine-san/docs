@@ -439,3 +439,23 @@ test('read-only file tools and extra folders reach the CLI', () => {
   assert.equal(web[web.indexOf('--tools') + 1], 'WebSearch,WebFetch,Read,Glob,Grep');
   assert.ok(!web.includes('--add-dir'));
 });
+
+test('@file mentions inline the file for the agents that read the message, once', async () => {
+  const { orch, runner } = setup((_req, name) => ok(name === 'Nova' ? '@Quill tighten this' : 'done'));
+  orch.addAgent(draft('Nova', { isLead: true }));
+  orch.addAgent(draft('Quill'));
+  const dir = tmpDir('mention');
+  fs.writeFileSync(path.join(dir, 'brief.md'), 'Launch is on October 3.');
+  const p = orch.createProject('P', [dir]);
+  const chat = orch.newChat('group', p.id);
+  orch.userMessage(chat.id, 'Summarise @brief.md please, and @missing.md too');
+  await idle(orch);
+  const [nova, quill, nova2] = runner.calls.map((c) => c.req);
+  assert.match(nova.prompt, /<file path="brief.md">\nLaunch is on October 3.\n<\/file>/);
+  assert.equal(nova.readFiles, true, 'unchanged: the lead may still read');
+  assert.match(quill.prompt, /Launch is on October 3/, 'Quill sees the file with the user message');
+  assert.doesNotMatch(nova2.prompt, /Launch is on October 3/, 'not resent to Nova on her next turn');
+  assert.deepEqual(orch.state.messages.find((m) => m.from === USER_ID)!.files, [path.join(dir, 'brief.md')]);
+  assert.ok(orch.state.messages.some((m) => m.from === SYSTEM_ID && /missing\.md/.test(m.text)));
+  assert.deepEqual(orch.searchFiles(chat.id, 'bri').map((f) => f.label), ['brief.md']);
+});

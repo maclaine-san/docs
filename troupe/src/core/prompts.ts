@@ -1,5 +1,6 @@
 import type { Agent, AppState, Message, Project } from '../shared/types';
 import { USER_ID, SYSTEM_ID } from '../shared/types';
+import { formatFile, type FileContent } from './files';
 
 /** Max earlier chat messages shown to an agent per turn, and max characters each. */
 const CONTEXT_MESSAGES = 12;
@@ -54,7 +55,8 @@ export function systemPrompt(state: AppState, agent: Agent, workdir: string, pro
     'How to behave:',
     '- Your reply is posted to the chat as-is (markdown is fine). Be concise and direct.',
     '- To get help, @mention a teammate with a specific request, e.g. "@Leo draft a tagline for X". They answer in the chat and you are woken up with their answers.',
-    '- Only @mention someone when you need them to act. Never @mention just to thank, acknowledge or say hello.',
+    '- Writing @Name wakes that teammate immediately, even in "if needed" or "I could ask @Name". So only write @Name when you are handing them work right now; otherwise use their name without @. Never @mention to thank, acknowledge or say hello.',
+    '- If the request is unclear, ask the user yourself instead of bringing in teammates.',
     '- When a teammate asks you something, answer it; don\'t @mention them back unless you need more from them.',
   ];
   if (agent.isLead) {
@@ -88,6 +90,7 @@ export function turnPrompt(
   addressedBy: string[],
   teamChanged: boolean,
   projectUpdate?: ProjectContext,
+  files?: Map<string, FileContent[]>,
 ): string {
   const parts: string[] = [];
   if (projectUpdate) parts.push(`(Project update:\n${projectBrief(projectUpdate)})`);
@@ -96,7 +99,10 @@ export function turnPrompt(
   const shown = others.slice(-CONTEXT_MESSAGES);
   const skipped = others.length - shown.length;
   if (skipped > 0) parts.push(`(${skipped} earlier messages omitted)`);
-  for (const m of shown) parts.push(`${speaker(state, m.from)}: ${clip(m.text)}`);
+  for (const m of shown) {
+    const attached = files?.get(m.id);
+    parts.push(`${speaker(state, m.from)}: ${clip(m.text)}${attached?.length ? '\n\n' + attached.map(formatFile).join('\n\n') : ''}`);
+  }
   const who = [...new Set(addressedBy.map((id) => speaker(state, id)))];
   parts.push(`---\n${who.length ? `${who.join(' and ')} ${who.length > 1 ? 'are' : 'is'} waiting for your reply.` : 'Reply if you have something useful to add.'}`);
   return parts.join('\n\n');

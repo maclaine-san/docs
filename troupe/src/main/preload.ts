@@ -5,7 +5,7 @@ const call = (method: string) => (...args: unknown[]) => ipcRenderer.invoke('tro
 const methods = [
   'getState', 'getLive', 'addAgent', 'updateAgent', 'removeAgent', 'newChat', 'moveChat', 'setChatTarget', 'renameChat',
   'deleteChat', 'sendMessage', 'stopChat', 'updateSettings', 'checkClaude', 'chooseDirectory', 'chooseDirectories',
-  'createProject', 'updateProject', 'deleteProject', 'showInFinder',
+  'createProject', 'updateProject', 'deleteProject', 'showInFinder', 'searchFiles', 'openInMain', 'hideQuick', 'shortcutStatus',
 ] as const;
 
 const api = Object.fromEntries(methods.map((m) => [m, call(m)])) as unknown as TroupeApi;
@@ -16,6 +16,8 @@ const listen = (channel: string) => (cb: (v: any) => void) => {
 };
 api.onState = listen('state');
 api.onLive = listen('live');
+api.onOpenChat = listen('open-chat');
+api.onQuickShown = listen('quick-shown');
 api.pathForFile = (file) => webUtils.getPathForFile(file);
 
 contextBridge.exposeInMainWorld('troupe', api);

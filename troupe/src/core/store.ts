@@ -17,6 +17,8 @@ export function defaultSettings(dataDir: string): Settings {
     usagePauseAt: 0.8,
     paused: false,
     pauseReason: '',
+    quickShortcut: 'Alt+Space',
+    notifications: true,
   };
 }
 
