@@ -3,8 +3,17 @@
 export const USER_ID = 'user';
 export const SYSTEM_ID = 'system';
 
-/** What an agent may do beyond talking. */
-export type Capability = 'chat' | 'web' | 'files' | 'full';
+/**
+ * What an agent may do beyond talking:
+ * chat: nothing · web: search/fetch · files: read/edit files + web ·
+ * code: files + web + a fixed list of test/build/git-read commands · full: anything, no checks.
+ */
+export type Capability = 'chat' | 'web' | 'files' | 'code' | 'full';
+
+/** Capabilities that can change files. */
+export function canEditFiles(c: Capability): boolean {
+  return c === 'files' || c === 'code' || c === 'full';
+}
 
 export interface Agent {
   id: string;
@@ -64,6 +73,8 @@ export interface Chat {
   seats: Record<string, Seat>;
   /** Started from the menu-bar quick chat. */
   quick?: boolean;
+  /** Folders already checkpointed (or found not to be git repos) in this chat. */
+  checkpointed?: string[];
   createdAt: number;
   updatedAt: number;
 }
@@ -79,6 +90,8 @@ export interface Message {
   depth: number;
   /** Files @mentioned in the message (absolute paths). Their contents are inlined for agents. */
   files?: string[];
+  /** A checkpoint note: the folder snapshot you can roll back to. Not shown to agents. */
+  checkpoint?: { folder: string; sha: string; files: number };
 }
 
 /** A pending delivery: `agentId` should read `messageId` in `chatId` on its next turn. */
@@ -115,6 +128,8 @@ export interface Settings {
   quickShortcut: string;
   /** Notify when an agent replies while Troupe isn't in front. */
   notifications: boolean;
+  /** Snapshot a project's git folder before agents first edit it in a chat, for one-click undo. */
+  checkpoints: boolean;
 }
 
 export interface UsageWindow {
@@ -180,6 +195,8 @@ export interface TroupeApi {
   /** Show the main window on a chat (from the quick window or a notification). */
   openInMain(chatId: string): Promise<void>;
   hideQuick(): Promise<void>;
+  /** Roll a folder back to the checkpoint in this note message. */
+  restoreCheckpoint(messageId: string): Promise<void>;
   /** Whether the quick-chat shortcut is registered. */
   shortcutStatus(): Promise<{ accelerator: string; ok: boolean }>;
   /** Main window: open this chat. */

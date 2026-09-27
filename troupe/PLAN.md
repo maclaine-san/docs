@@ -81,6 +81,12 @@ Measured: a chat-only turn is about 900 input tokens in lean mode, against about
 - [x] Notifications when an agent replies while Troupe is in the background; clicking one opens the chat
 - [x] Prompt fix: `@Name` is only used to hand off work now, so conditional mentions no longer wake teammates
 
+**v0.5: Autonomous coding tasks**
+- [x] "Code" capability: file tools plus an allowlist of test, build and read-only git commands, in the default permission mode. `acceptEdits` was found to auto-approve `rm` and `mv`, so it's no longer used anywhere.
+- [x] Strict hand-offs: only a line starting with `@Name` wakes a teammate, and "@Asker done" answers are delivered without triggering a new round
+- [x] Git checkpoints before a chat's first edit (temporary index, `refs/troupe/`, branch and staging untouched), a live "N files changed" note and one-click Undo
+- [x] Benchmark: "Improve the SEO of my current project" with Chief, CTO and Researcher took 3 turns, ~$0.15, fixed everything with tests passing and no intervention (before: 4 turns, $0.61)
+
 **Next**
 - Attach files and images to a message
 - Voice input

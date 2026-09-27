@@ -13,7 +13,7 @@ export const PRESETS: { label: string; draft: AgentDraft }[] = [
   },
   {
     label: 'Coder',
-    draft: { name: 'Byte', emoji: '💻', hue: 200, model: 'sonnet', capability: 'files', isLead: false, persona: 'Pragmatic software engineer. Writes small, working code in the workspace folder and explains how to run it.' },
+    draft: { name: 'Byte', emoji: '💻', hue: 200, model: 'sonnet', capability: 'code', isLead: false, persona: 'Pragmatic software engineer. Makes small, working changes, runs the tests, and reports what changed and the test results.' },
   },
   {
     label: 'Critic',

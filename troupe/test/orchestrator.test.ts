@@ -1,6 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
+import { execFileSync } from 'node:child_process';
 import os from 'node:os';
 import path from 'node:path';
 import { Store } from '../src/core/store';
@@ -102,7 +103,7 @@ test('@mentions in your message wake exactly those agents', async () => {
 
 test('the lead waits for everyone it @mentioned, then gets all answers in one turn', async () => {
   const { orch, runner } = setup(async (req, name) => {
-    if (name === 'Nova' && /write me a launch post/.test(req.prompt)) return ok('@Scout find 3 facts. @Quill draft a headline.');
+    if (name === 'Nova' && /write me a launch post/.test(req.prompt)) return ok('@Scout find 3 facts.\n@Quill draft a headline.');
     if (name === 'Scout') {
       await new Promise((r) => setTimeout(r, 30)); // slower than Quill
       return ok('fact1 fact2 fact3');
@@ -458,4 +459,92 @@ test('@file mentions inline the file for the agents that read the message, once'
   assert.deepEqual(orch.state.messages.find((m) => m.from === USER_ID)!.files, [path.join(dir, 'brief.md')]);
   assert.ok(orch.state.messages.some((m) => m.from === SYSTEM_ID && /missing\.md/.test(m.text)));
   assert.deepEqual(orch.searchFiles(chat.id, 'bri').map((f) => f.label), ['brief.md']);
+});
+
+// ------------------------------------------------------------------ code agents, hand-offs, checkpoints
+
+test('only @Name at the start of a line hands off work', async () => {
+  const replies: Record<string, string> = {
+    Chief: "I'll check with the team. As @CTO's notes say, and per @Researcher, we're close.\n\n@CTO please fix the titles.\n- @Researcher find 3 sources",
+  };
+  const { orch, runner } = setup((_r, name) => ok(replies[name] ?? 'done'));
+  orch.addAgent(draft('Chief', { isLead: true }));
+  orch.addAgent(draft('CTO'));
+  orch.addAgent(draft('Researcher'));
+  orch.addAgent(draft('Quill'));
+  const chat = orch.newChat('group');
+  orch.userMessage(chat.id, 'go');
+  await idle(orch);
+  assert.deepEqual(runner.calls.map((c) => c.agent).slice(1, 3).sort(), ['CTO', 'Researcher']);
+  assert.equal(runner.calls.filter((c) => c.agent === 'Quill').length, 0);
+
+  // A reply that only mentions someone mid-sentence wakes nobody.
+  replies.Chief = 'Done. Thanks to @CTO and @Researcher for the help.';
+  const n = runner.calls.length;
+  orch.userMessage(chat.id, 'thanks');
+  await idle(orch);
+  assert.equal(runner.calls.length, n + 1);
+});
+
+test('code capability: file tools plus an allowlist of test/build commands, no auto-approved edits mode', () => {
+  const base: TurnRequest = {
+    claudePath: 'claude', cwd: '/a', env: {}, sessionId: 'sid', resume: false, systemPrompt: 'sys', prompt: 'p',
+    model: 'sonnet', capability: 'code', lean: true,
+  };
+  const args = buildArgs(base);
+  assert.equal(args[args.indexOf('--tools') + 1], 'Read,Glob,Grep,Edit,Write,WebSearch,WebFetch,Bash');
+  const allowed = args[args.indexOf('--allowedTools') + 1].split(',');
+  assert.ok(allowed.includes('Bash(npm test:*)') && allowed.includes('Bash(git diff:*)') && allowed.includes('Edit'));
+  assert.ok(!allowed.includes('Bash') && !allowed.some((a) => /rm|curl|Bash\(\*/.test(a)));
+  assert.ok(!args.includes('--permission-mode'), 'acceptEdits would also auto-approve rm/mv');
+  assert.ok(!buildArgs({ ...base, capability: 'files' }).includes('--permission-mode'));
+});
+
+test('a checkpoint is saved once per chat before the first editing turn, and hidden from agents', async () => {
+  const { orch, runner } = setup((req, name) => {
+    if (name === 'CTO') fs.writeFileSync(path.join(req.cwd, 'index.html'), '<h1>changed</h1>');
+    return ok(name === 'Chief' ? '@CTO fix it' : 'fixed');
+  });
+  orch.addAgent(draft('Chief', { isLead: true }));
+  orch.addAgent(draft('CTO', { capability: 'code' }));
+  const dir = tmpDir('cp');
+  execFileSync('git', ['init', '-q'], { cwd: dir });
+  fs.writeFileSync(path.join(dir, 'index.html'), '<h1>orig</h1>');
+  const p = orch.createProject('Site', [dir]);
+  const chat = orch.newChat('group', p.id);
+  orch.userMessage(chat.id, 'improve it');
+  await idle(orch);
+  orch.userMessage(chat.id, '@CTO once more');
+  await idle(orch);
+  const notes = orch.state.messages.filter((m) => m.checkpoint);
+  assert.equal(notes.length, 1, 'one checkpoint per folder per chat');
+  assert.equal(notes[0].checkpoint!.files, 1);
+  assert.match(notes[0].text, /1 file changed/);
+  for (const c of runner.calls) assert.doesNotMatch(c.req.prompt, /Checkpoint/);
+
+  orch.restoreCheckpoint(notes[0].id);
+  assert.equal(fs.readFileSync(path.join(dir, 'index.html'), 'utf8'), '<h1>orig</h1>');
+  assert.ok(orch.state.messages.some((m) => m.from === SYSTEM_ID && /Undid all changes/.test(m.text)));
+});
+
+test('non-git project folders get a one-time explanation instead of a checkpoint', async () => {
+  const { orch } = setup(() => ok('ok'));
+  orch.addAgent(draft('CTO', { isLead: true, capability: 'files' }));
+  const p = orch.createProject('Plain', [tmpDir('plain')]);
+  const chat = orch.newChat('group', p.id);
+  orch.userMessage(chat.id, 'one');
+  await idle(orch);
+  orch.userMessage(chat.id, 'two');
+  await idle(orch);
+  assert.equal(orch.state.messages.filter((m) => /isn't the root of a git repository/.test(m.text)).length, 1);
+});
+
+test('answering the asker with "@Asker done" does not wake the answerer again', async () => {
+  const { orch, runner } = setup((_r, name) => ok(name === 'Chief' ? (runner.calls.length === 1 ? '@CTO fix it' : 'All done. Thanks CTO.') : '@Chief Done, tests pass.'));
+  orch.addAgent(draft('Chief', { isLead: true }));
+  orch.addAgent(draft('CTO'));
+  const chat = orch.newChat('group');
+  orch.userMessage(chat.id, 'go');
+  await idle(orch);
+  assert.deepEqual(runner.calls.map((c) => c.agent), ['Chief', 'CTO', 'Chief']);
 });

@@ -57,9 +57,25 @@ const WEB = ['WebSearch', 'WebFetch'];
 const READ = ['Read', 'Glob', 'Grep'];
 const FILES = [...READ, 'Edit', 'Write'];
 
-/** Built-in Claude Code tools and auto-approved tools for each capability. */
+/**
+ * Shell commands a "code" agent may run: tests, builds and read-only git.
+ * Anything else (rm, mv, curl, redirects, chained commands…) is refused by
+ * Claude Code, since nobody is there to approve it.
+ */
+export const CODE_COMMANDS = [
+  'npm test', 'npm run', 'pnpm test', 'pnpm run', 'yarn test', 'yarn run', 'bun test', 'bun run',
+  'pytest', 'python -m pytest', 'python3 -m pytest', 'go test', 'go build', 'go vet', 'cargo test', 'cargo build', 'cargo check',
+  'git status', 'git diff', 'git log', 'git show', 'ls',
+];
+
+/**
+ * Built-in Claude Code tools and auto-approved tools for each capability.
+ * Uses the default permission mode everywhere: "acceptEdits" would also
+ * auto-approve shell commands like rm and mv.
+ */
 export function toolArgs(cap: Capability, readFiles = false): string[] {
-  const allow = (tools: string[]) => (tools.length ? ['--tools', tools.join(','), '--allowedTools', tools.join(',')] : ['--tools', '']);
+  const allow = (tools: string[], extra: string[] = []) =>
+    tools.length ? ['--tools', tools.join(','), '--allowedTools', [...tools, ...extra].join(',')] : ['--tools', ''];
   const read = readFiles ? READ : [];
   switch (cap) {
     case 'chat':
@@ -67,7 +83,12 @@ export function toolArgs(cap: Capability, readFiles = false): string[] {
     case 'web':
       return allow([...WEB, ...read]);
     case 'files':
-      return [...allow([...FILES, ...WEB]), '--permission-mode', 'acceptEdits'];
+      return allow([...FILES, ...WEB]);
+    case 'code':
+      return [
+        '--tools', [...FILES, ...WEB, 'Bash'].join(','),
+        '--allowedTools', [...FILES, ...WEB, ...CODE_COMMANDS.map((c) => `Bash(${c}:*)`)].join(','),
+      ];
     case 'full':
       return ['--dangerously-skip-permissions'];
   }

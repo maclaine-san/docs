@@ -3,10 +3,11 @@ import { randomUUID } from 'node:crypto';
 import fs from 'node:fs';
 import type { Agent, AgentDraft, AppState, Chat, InboxItem, LiveStatus, Message, Project, Seat, Settings } from '../shared/types';
 import path from 'node:path';
-import { USER_ID, SYSTEM_ID } from '../shared/types';
+import { USER_ID, SYSTEM_ID, canEditFiles } from '../shared/types';
 import { today, type Store } from './store';
 import type { Runner, TurnHandle } from './claudeRunner';
-import { mentionedAgents, systemPrompt, turnPrompt, type ProjectContext } from './prompts';
+import { handOffs, mentionedAgents, systemPrompt, turnPrompt, type ProjectContext } from './prompts';
+import { changesSince, createCheckpoint, restoreCheckpoint } from './checkpoint';
 import { displayLabel, FILE_CHARS, mentionToken, parseFileMentions, readForPrompt, resolveMention, searchFiles, TURN_FILE_CHARS, type FileContent } from './files';
 
 const NAME_RE = /^[A-Za-z][A-Za-z0-9_-]{0,23}$/;
@@ -458,6 +459,7 @@ export class Orchestrator extends EventEmitter {
     if (!triggers.length) return this.changed();
 
     const seat = this.seat(chat, agentId);
+    this.checkpointBeforeEdits(chat, agent);
     const chatMsgs = this.state.messages.filter((m) => m.chatId === chatId);
     const unseen = chatMsgs.filter((m) => m.ts > seat.seenUntil);
     const teamChanged = seat.started && seat.teamVersion !== this.state.teamVersion;
@@ -479,7 +481,7 @@ export class Orchestrator extends EventEmitter {
         this.changed();
         return;
       }
-      const canEdit = agent.capability === 'files' || agent.capability === 'full';
+      const canEdit = canEditFiles(agent.capability);
       const canRead = canEdit || project.readAccess === 'all' || (project.readAccess === 'lead' && agent.isLead);
       ctx = { project, canRead, canEdit };
       if (project.folders[0]) cwd = project.folders[0];
@@ -535,6 +537,7 @@ export class Orchestrator extends EventEmitter {
       if (!a || !c) return this.schedule();
       a.turns++;
       a.costUsd += res.costUsd;
+      if (canEditFiles(a.capability)) this.refreshCheckpointNotes(c);
 
       if (res.ok) {
         seat.started = true;
@@ -558,6 +561,66 @@ export class Orchestrator extends EventEmitter {
       this.changed();
       this.schedule();
     });
+  }
+
+  // ---------------------------------------------------------------- checkpoints
+
+  /** Before an agent that can edit files first works in a project chat, snapshot each git folder. */
+  private checkpointBeforeEdits(chat: Chat, agent: Agent): void {
+    const project = this.state.projects.find((p) => p.id === chat.projectId);
+    if (!project || !this.state.settings.checkpoints || !canEditFiles(agent.capability)) return;
+    const done = (chat.checkpointed ??= []);
+    for (const folder of project.folders) {
+      if (done.includes(folder)) continue;
+      done.push(folder);
+      let sha: string | null = null;
+      try {
+        sha = createCheckpoint(folder, chat.title);
+      } catch (e) {
+        this.note(chat.id, `Couldn't save a checkpoint of \`${path.basename(folder)}\`: ${(e as Error).message.slice(0, 200)}`);
+        continue;
+      }
+      if (!sha) {
+        this.note(chat.id, `\`${path.basename(folder)}\` isn't the root of a git repository, so there's no checkpoint to undo ${agent.name}'s edits. Run \`git init\` there to enable it.`);
+        continue;
+      }
+      const msg = this.post(chat.id, SYSTEM_ID, this.checkpointText(folder, 0, 0, 0), 0);
+      msg.checkpoint = { folder, sha, files: 0 };
+    }
+  }
+
+  private checkpointText(folder: string, files: number, plus: number, minus: number): string {
+    const name = `\`${path.basename(folder)}\``;
+    return files
+      ? `📌 Checkpoint of ${name} saved before agents edited it. Since then: **${files} file${files === 1 ? '' : 's'} changed** (+${plus} −${minus}).`
+      : `📌 Checkpoint of ${name} saved before agents edit it. You can undo their changes from here.`;
+  }
+
+  /** Update each checkpoint note in the chat with what has changed since. */
+  private refreshCheckpointNotes(chat: Chat): void {
+    for (const m of this.state.messages) {
+      if (m.chatId !== chat.id || !m.checkpoint) continue;
+      try {
+        const st = changesSince(m.checkpoint.folder, m.checkpoint.sha);
+        m.checkpoint.files = st.files;
+        m.text = this.checkpointText(m.checkpoint.folder, st.files, st.insertions, st.deletions);
+      } catch {
+        /* folder moved or not a repo any more */
+      }
+    }
+  }
+
+  /** Undo: put the folder back to the checkpoint. Stops the chat first so nobody is mid-edit. */
+  restoreCheckpoint(messageId: string): void {
+    const m = this.state.messages.find((x) => x.id === messageId);
+    if (!m?.checkpoint) throw new UserError('That checkpoint no longer exists.');
+    this.stopChat(m.chatId);
+    const st = restoreCheckpoint(m.checkpoint.folder, m.checkpoint.sha);
+    m.checkpoint.files = 0;
+    m.text = this.checkpointText(m.checkpoint.folder, 0, 0, 0);
+    // Visible to agents, so they know their earlier edits are gone.
+    this.note(m.chatId, `↩︎ Undid all changes to \`${path.basename(m.checkpoint.folder)}\` since the checkpoint (${st.files} file${st.files === 1 ? '' : 's'}). Earlier edits in this chat no longer exist.`);
+    this.changed();
   }
 
   /** Read @mentioned files for the messages this agent is about to see, within the per-turn budget. */
@@ -585,23 +648,22 @@ export class Orchestrator extends EventEmitter {
 
   /** Route an agent's reply: wake anyone it @mentioned, and hand the answer back to whoever asked. */
   private afterReply(chat: Chat, agent: Agent, reply: Message, askers: string[]): void {
-    const mentions = mentionedAgents(this.state, reply.text, agent.id);
-    if (mentions.length) {
+    // "@Chief Done: …" to whoever asked is an answer, not a new request: deliver it, don't wait for a reply.
+    const requests = handOffs(this.state, reply.text, agent.id).filter((id) => !askers.includes(id));
+    if (requests.length) {
       if (reply.depth > this.state.settings.maxDepth) {
         this.note(chat.id, `Loop limit reached (${this.state.settings.maxDepth} hops between agents), so the team is waiting for you.`);
       } else {
         const k = seatKey(chat.id, agent.id);
         const set = this.pending.get(k) ?? new Set<string>();
-        for (const m of mentions) {
+        for (const m of requests) {
           set.add(m);
           this.state.inbox.push({ chatId: chat.id, agentId: m, messageId: reply.id, askedBy: agent.id });
         }
         this.pending.set(k, set);
       }
     }
-    this.release(chat.id, agent.id, askers.filter((x) => !mentions.includes(x)), reply);
-    // Askers that were @mentioned back already have the reply queued; just clear the wait.
-    for (const asker of askers.filter((x) => mentions.includes(x))) this.pending.get(seatKey(chat.id, asker))?.delete(agent.id);
+    this.release(chat.id, agent.id, askers, reply);
   }
 
   /** `agentId` has answered (or failed) for each asker: stop waiting and deliver the answer. */

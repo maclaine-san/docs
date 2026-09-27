@@ -1,7 +1,7 @@
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { createRoot } from 'react-dom/client';
 import type { Agent, AgentDraft, AppState, Capability, Chat, LiveStatus, Message, Project, ProjectReadAccess, TroupeApi } from '../shared/types';
-import { SYSTEM_ID, USER_ID } from '../shared/types';
+import { canEditFiles, SYSTEM_ID, USER_ID } from '../shared/types';
 import { EMOJIS, PRESETS, SUGGESTIONS } from './templates';
 
 const api = (window as unknown as { troupe: TroupeApi }).troupe;
@@ -15,7 +15,8 @@ const MODELS = [
 const CAPABILITIES: { value: Capability; label: string }[] = [
   { value: 'chat', label: 'Just chat (lightest)' },
   { value: 'web', label: 'Search the web' },
-  { value: 'files', label: 'Web + read and write files in the workspace' },
+  { value: 'files', label: 'Web + read and edit files' },
+  { value: 'code', label: 'Code: files + run tests, builds, git status/diff' },
   { value: 'full', label: 'Everything, no permission checks (risky)' },
 ];
 
@@ -454,6 +455,25 @@ function Thread({ state, chat, live, send, compact }: { state: AppState; chat: C
 
 function MessageRow({ state, m, prev }: { state: AppState; m: Message; prev?: Message }) {
   const html = useMemo(() => renderMarkdown(m.text, state.agents), [m.text, state.agents]);
+  if (m.from === SYSTEM_ID && m.checkpoint) {
+    const cp = m.checkpoint;
+    return (
+      <div className="note checkpoint">
+        <span dangerouslySetInnerHTML={{ __html: html }} />
+        {cp.files > 0 && (
+          <button
+            className="mini undo"
+            onClick={() =>
+              confirm(`Undo all changes to ${cp.files} file(s) in ${cp.folder} since this checkpoint? Running agents in this chat are stopped first.`) &&
+              api.restoreCheckpoint(m.id).catch((e) => alert(errMsg(e)))
+            }
+          >
+            ↩︎ Undo
+          </button>
+        )}
+      </div>
+    );
+  }
   if (m.from === SYSTEM_ID) return <div className="note" dangerouslySetInnerHTML={{ __html: html }} />;
   if (m.from === USER_ID) {
     return (
@@ -655,7 +675,7 @@ function ProjectPage(p: {
   const chats = state.chats
     .filter((c) => c.projectId === project.id && state.messages.some((m) => m.chatId === c.id))
     .sort((a, b) => b.updatedAt - a.updatedAt);
-  const editors = state.agents.filter((a) => a.capability === 'files' || a.capability === 'full');
+  const editors = state.agents.filter((a) => canEditFiles(a.capability));
   const setFolders = (folders: string[]) => run(() => api.updateProject(project.id, { folders }));
   const addFolders = async (paths?: string[]) => {
     const dirs = paths ?? (await api.chooseDirectories());
@@ -1038,6 +1058,11 @@ function SettingsDialog({ state, close, run }: { state: AppState; close: () => v
             <input type="number" min={1} max={6} value={s.maxConcurrent} onChange={(e) => upd({ maxConcurrent: Number(e.target.value) })} />
           </label>
         </div>
+
+        <label className="check">
+          <input type="checkbox" checked={s.checkpoints} onChange={(e) => upd({ checkpoints: e.target.checked })} />
+          <span>Save a git checkpoint before agents edit a project, so you can undo their changes in one click</span>
+        </label>
 
         <h4>Menu bar</h4>
         <ShortcutSetting value={s.quickShortcut} save={(v) => upd({ quickShortcut: v })} />

@@ -1,6 +1,7 @@
 import type { Agent, AppState, Message, Project } from '../shared/types';
-import { USER_ID, SYSTEM_ID } from '../shared/types';
+import { USER_ID, SYSTEM_ID, canEditFiles } from '../shared/types';
 import { formatFile, type FileContent } from './files';
+import { CODE_COMMANDS } from './claudeRunner';
 
 /** Max earlier chat messages shown to an agent per turn, and max characters each. */
 const CONTEXT_MESSAGES = 12;
@@ -54,8 +55,8 @@ export function systemPrompt(state: AppState, agent: Agent, workdir: string, pro
     '',
     'How to behave:',
     '- Your reply is posted to the chat as-is (markdown is fine). Be concise and direct.',
-    '- To get help, @mention a teammate with a specific request, e.g. "@Leo draft a tagline for X". They answer in the chat and you are woken up with their answers.',
-    '- Writing @Name wakes that teammate immediately, even in "if needed" or "I could ask @Name". So only write @Name when you are handing them work right now; otherwise use their name without @. Never @mention to thank, acknowledge or say hello.',
+    '- To hand work to a teammate, start a line with @Name and a specific request, e.g. "@Leo draft a tagline for X". Several at once: one line each. They answer in the chat and you are woken up once with all their answers.',
+    '- Only a line that starts with @Name notifies anyone. Elsewhere, refer to teammates by plain name. Never hand off just to thank, acknowledge or say hello.',
     '- If the request is unclear, ask the user yourself instead of bringing in teammates.',
     '- When a teammate asks you something, answer it; don\'t @mention them back unless you need more from them.',
   ];
@@ -64,8 +65,11 @@ export function systemPrompt(state: AppState, agent: Agent, workdir: string, pro
       '- You are the lead. When the user writes to the group, answer yourself if you can. Bring teammates in only when their skills clearly help, and ask everyone you need in one message. When their answers arrive, give the user one combined final answer.',
     );
   }
+  if (agent.capability === 'code') {
+    lines.push(`- Shell commands you can run: ${CODE_COMMANDS.join(', ')}. Anything else (rm, mv, curl, redirects, chained commands) is blocked. Use the Edit/Write tools to change files.`);
+  }
   if (project) lines.push('', projectBrief(project));
-  else if (agent.capability === 'files' || agent.capability === 'full') lines.push(`- Your working folder is ${workdir}. Save substantial deliverables there as files.`);
+  else if (canEditFiles(agent.capability)) lines.push(`- Your working folder is ${workdir}. Save substantial deliverables there as files.`);
   return lines.join('\n');
 }
 
@@ -95,7 +99,7 @@ export function turnPrompt(
   const parts: string[] = [];
   if (projectUpdate) parts.push(`(Project update:\n${projectBrief(projectUpdate)})`);
   if (teamChanged) parts.push(`(Team update. You are ${agent.name}${agent.isLead ? ', the lead' : ''}: ${agent.persona}\nYour teammates are now:\n${roster(state, agent)})`);
-  const others = unseen.filter((m) => m.from !== agent.id);
+  const others = unseen.filter((m) => m.from !== agent.id && !m.checkpoint);
   const shown = others.slice(-CONTEXT_MESSAGES);
   const skipped = others.length - shown.length;
   if (skipped > 0) parts.push(`(${skipped} earlier messages omitted)`);
@@ -108,9 +112,24 @@ export function turnPrompt(
   return parts.join('\n\n');
 }
 
+/**
+ * Agents an agent hands work to: @Name at the start of a line (optionally a
+ * list like "@Scout @Quill, …" or after a bullet). Mid-sentence mentions such
+ * as "@CTO's fix" don't count, so agents can refer to each other freely.
+ */
+export function handOffs(state: AppState, text: string, exclude = ''): string[] {
+  const names: string[] = [];
+  for (const line of text.split('\n')) {
+    const lead = /^\s*(?:[-*•>]|\d+[.)])?\s*\**((?:@[A-Za-z][\w-]*\**(?:\s*(?:,|&|and)\s*|\s+)?)+)/.exec(line);
+    if (!lead) continue;
+    for (const m of lead[1].matchAll(/@([A-Za-z][\w-]*)/g)) names.push(m[1]);
+  }
+  return mentionedAgents(state, names.map((n) => `@${n}`).join(' '), exclude);
+}
+
 /** Agent ids @mentioned in `text` (by name, case-insensitive), excluding `exclude`. */
 export function mentionedAgents(state: AppState, text: string, exclude = ''): string[] {
-  const names = [...text.matchAll(/@([A-Za-z][A-Za-z0-9_-]*)/g)].map((m) => m[1].toLowerCase());
+  const names = [...text.matchAll(/@([A-Za-z][A-Za-z0-9_-]*)(?!['’]s\b)/g)].map((m) => m[1].toLowerCase());
   const ids = names
     .map((n) => state.agents.find((a) => a.name.toLowerCase() === n)?.id)
     .filter((id): id is string => Boolean(id) && id !== exclude);

@@ -59,7 +59,23 @@ npm run dist:mac     # optional: unsigned .dmg/.app in release/
   - Troupe keeps running in the menu bar when you close the window. Quit from the ◆ menu, which also shows usage and pause/resume.
   - You get a notification when an agent replies while Troupe is in the background.
   - Change or turn off the shortcut in Settings.
-- **Each agent has:** an emoji, a name, a "who are they?" description, a model, and what they can use. Options are just chat, web search, files in a workspace folder, or everything.
+- **Each agent has:** an emoji, a name, a "who are they?" description, a model, and what they can use:
+
+  | Can use | What it allows |
+  |---|---|
+  | Just chat | Talking only (lightest) |
+  | Search the web | Web search and fetch |
+  | Web + files | Read and edit files |
+  | **Code** | Files, web, and only these commands: `npm/pnpm/yarn/bun test` and `run`, `pytest`, `go test/build/vet`, `cargo test/build/check`, `git status/diff/log/show`, `ls`. Anything else (`rm`, `mv`, `curl`, `>` redirects, chained commands) is refused automatically. Note that running tests still runs your project's own code. |
+  | Everything | No permission checks at all. Risky, and Claude Code refuses it when running as root. |
+
+- **Undo for agent edits:**
+  - Before an agent that can edit files first works in a project chat, Troupe saves a git checkpoint of each project folder that is a git repository.
+  - The chat shows a 📌 note with how many files changed, and **↩︎ Undo** puts the folder back exactly as it was, including removing files the agents created.
+  - Saving the checkpoint never touches your branch, staged files or commit history. It's stored under `refs/troupe/`, and files git ignores are left alone.
+  - Folders that aren't git repositories get a one-time note instead.
+  - You can turn this off in Settings.
+- **Hand-offs:** an agent hands work to a teammate by starting a line with `@Name`. Mentions in the middle of a sentence ("as @CTO's fix shows") don't wake anyone, and answering the agent who asked ("@Chief Done") doesn't count as a new request. Your own `@mentions` work anywhere in a message.
 
 ## Staying light on usage
 
@@ -74,11 +90,24 @@ All agents share your subscription's limits, so Troupe is built to use as little
 | **No tool overhead** | Chat-only agents load no tools at all, and teammates are coordinated through plain `@mentions`, not tool calls. |
 | **Guards** | 2 agents at a time, 6 agent-to-agent hops per message from you, 150 turns/day, and an auto-pause at 80% of your 5-hour window, which resumes when it resets. All adjustable in Settings. |
 | **@files instead of file tools** | Mentioning a file inlines just that file, once, with no tool definitions and no extra round trips. |
-| **Careful @mentions** | Agents are told that `@Name` wakes a teammate immediately, so they don't write "I could ask @Scout" and wake Scout by accident. A vague request now takes 1 turn instead of 3 (tested 3/3). |
+| **Strict hand-offs** | Only a line starting with `@Name` wakes a teammate, and answering the agent who asked never wakes you again. A vague request takes 1 turn, not 3. |
 | **File access only where needed** | File tools cost ~2.6k tokens per turn, so in projects only the lead can open files by default. Agents are told to search (Glob/Grep) before reading, and never to read whole folders. |
 | **Stop button** | Stops everything in the chat immediately. |
 
 The sidebar shows your 5-hour usage (as reported by Claude Code) and today's turn count.
+
+## Example: an autonomous task
+
+Team: Chief of Staff (lead, Sonnet, just chat), CTO (Sonnet, **Code**), Researcher (Haiku, web). Project: a small static site with an `npm test` SEO check that reports 17 problems. One message: *"Improve the SEO of my current project."*
+
+![SEO run](docs/seo-run.png)
+
+1. The Chief reads the project, finds the site and its test, and hands the CTO a precise fix list.
+2. A checkpoint is saved.
+3. The CTO edits both pages, adds `robots.txt` and `sitemap.xml`, runs `npm test` (all checks pass) and reports back.
+4. The Chief sends you a summary, plus one question: your real domain, which replaces the placeholder in the canonical links.
+
+**3 turns, 59 seconds, about $0.15 API-equivalent**, with no intervention. **Undo** restored the site exactly. The same run before strict hand-offs and the Code level took 4 turns and $0.61.
 
 ## Development
 

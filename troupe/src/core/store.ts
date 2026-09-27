@@ -19,6 +19,7 @@ export function defaultSettings(dataDir: string): Settings {
     pauseReason: '',
     quickShortcut: 'Alt+Space',
     notifications: true,
+    checkpoints: true,
   };
 }
 

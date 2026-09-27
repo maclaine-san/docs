@@ -282,3 +282,6 @@ body.quick-mode { background: transparent; }
 .quick .pausebar { width: calc(100% - 24px); }
 .quick-empty { display: grid; place-items: center; font-size: 13px; }
 .quick-empty kbd { border: 1px solid var(--line); border-radius: 4px; padding: 0 4px; font-size: 11px; }
+.note.checkpoint { display: flex; align-items: center; justify-content: center; gap: 10px; flex-wrap: wrap; }
+.note.checkpoint p { margin: 0; }
+.undo { border: 1px solid var(--line); color: var(--text); font-size: 12px; }
