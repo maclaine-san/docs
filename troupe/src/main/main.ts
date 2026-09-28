@@ -226,6 +226,8 @@ async function main() {
     },
     hideQuick: async () => quick?.hide(),
     restoreCheckpoint: async (id) => orch.restoreCheckpoint(id),
+    checkpointConflicts: async (id) => orch.checkpointConflicts(id),
+    getActivityView: async () => orch.activityView(),
     shortcutStatus: async () => ({ accelerator: orch.state.settings.quickShortcut, ok: Boolean(registeredShortcut) }),
     setChatTarget: async (c, t) => orch.setChatTarget(c, t),
     renameChat: async (c, t) => orch.renameChat(c, t),

@@ -1,6 +1,6 @@
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { createRoot } from 'react-dom/client';
-import type { Agent, AgentDraft, AppState, Capability, Chat, LiveStatus, Message, Project, ProjectReadAccess, TroupeApi } from '../shared/types';
+import type { ActivityView, Agent, AgentDraft, AppState, Capability, Chat, LiveStatus, Message, Project, ProjectReadAccess, TroupeApi } from '../shared/types';
 import { canEditFiles, SYSTEM_ID, USER_ID } from '../shared/types';
 import { EMOJIS, PRESETS, SUGGESTIONS } from './templates';
 
@@ -109,6 +109,7 @@ function App() {
   const [chatId, setChatId] = useState('');
   /** Id of the project whose page is open, or "" when a chat is shown. */
   const [projectPage, setProjectPage] = useState('');
+  const [activityOpen, setActivityOpen] = useState(false);
   const [editing, setEditing] = useState<Agent | 'new' | null>(null);
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [toast, setToast] = useState('');
@@ -145,11 +146,17 @@ function App() {
     setState(await api.getState());
     setChatId(c.id);
     setProjectPage('');
+    setActivityOpen(false);
     return c;
   };
   const showChat = (id: string) => {
     setChatId(id);
     setProjectPage('');
+    setActivityOpen(false);
+  };
+  const showProject = (id: string) => {
+    setProjectPage(id);
+    setActivityOpen(false);
   };
 
   // Opened from the quick window or a notification.
@@ -178,7 +185,7 @@ function App() {
     const p = await run(() => api.createProject('', dirs));
     if (!p) return;
     setState(await api.getState());
-    setProjectPage(p.id);
+    showProject(p.id);
   };
 
   useEffect(() => {
@@ -217,6 +224,14 @@ function App() {
           <span className="new-chat-label">New chat{activeProjectId ? ` in ${state.projects.find((p) => p.id === activeProjectId)?.name ?? 'project'}` : ''}</span>
           <kbd>⌘N</kbd>
         </button>
+        <button className={`side-nav ${activityOpen ? 'active' : ''}`} onClick={() => (setActivityOpen(true), setProjectPage(''))}>
+          <span>⚡</span> Activity
+          {(live.length > 0 || state.inbox.length > 0) && (
+            <span className="count">
+              {live.length} running{state.inbox.length ? ` · ${new Set(state.inbox.map((i) => i.chatId + i.agentId)).size} queued` : ''}
+            </span>
+          )}
+        </button>
         <nav className="history">
           <div
             className="projects"
@@ -243,14 +258,15 @@ function App() {
               const open = activeProjectId === p.id;
               return (
                 <div key={p.id}>
-                  <div className={`hist project ${projectPage === p.id ? 'active' : ''}`} onClick={() => setProjectPage(p.id)}>
+                  <div className={`hist project ${!activityOpen && projectPage === p.id ? 'active' : ''}`} onClick={() => showProject(p.id)}>
                     <span className="folder-ico">{open ? '📂' : '📁'}</span>
                     <span className="hist-title">{p.name}</span>
+                    {p.paused && <span className="paused-tag" title="Paused">⏸</span>}
                     {live.some((l) => pChats.some((c) => c.id === l.chatId)) && <span className="hist-live" />}
                   </div>
                   {open &&
                     pChats.slice(0, 6).map((c) => (
-                      <div key={c.id} className={`hist nested ${!projectPage && c.id === chat.id ? 'active' : ''}`} onClick={() => showChat(c.id)}>
+                      <div key={c.id} className={`hist nested ${!activityOpen && !projectPage && c.id === chat.id ? 'active' : ''}`} onClick={() => showChat(c.id)}>
                         <span className="hist-title">{c.title}</span>
                         {live.some((l) => l.chatId === c.id) && <span className="hist-live" />}
                       </div>
@@ -263,7 +279,7 @@ function App() {
             <div key={g}>
               <div className="group-label">{g}</div>
               {cs.map((c) => (
-                <div key={c.id} className={`hist ${!projectPage && c.id === chat.id ? 'active' : ''}`} onClick={() => showChat(c.id)}>
+                <div key={c.id} className={`hist ${!activityOpen && !projectPage && c.id === chat.id ? 'active' : ''}`} onClick={() => showChat(c.id)}>
                   <span className="hist-title">{c.title}</span>
                   {live.some((l) => l.chatId === c.id) && <span className="hist-live" />}
                   <button className="hist-del" title="Delete chat" onClick={(e) => (e.stopPropagation(), confirm('Delete this chat?') && run(() => api.deleteChat(c.id)))}>
@@ -279,7 +295,9 @@ function App() {
       </aside>
 
       <main>
-        {openProject ? (
+        {activityOpen ? (
+          <ActivityPage state={state} live={live} run={run} openChat={showChat} openProject={showProject} />
+        ) : openProject ? (
           <ProjectPage
             key={openProject.id}
             state={state}
@@ -294,9 +312,9 @@ function App() {
           />
         ) : (
           <>
-            <TopBar state={state} chat={chat} live={live} run={run} edit={setEditing} openProject={setProjectPage} />
+            <TopBar state={state} chat={chat} live={live} run={run} edit={setEditing} openProject={showProject} />
             <Thread state={state} chat={chat} live={live} send={(t) => run(() => api.sendMessage(chat.id, t))} />
-            <PauseBar state={state} run={run} />
+            <PauseBar state={state} run={run} chat={chat} />
             <Composer state={state} chat={chat} live={live} run={run} />
           </>
         )}
@@ -463,10 +481,15 @@ function MessageRow({ state, m, prev }: { state: AppState; m: Message; prev?: Me
         {cp.files > 0 && (
           <button
             className="mini undo"
-            onClick={() =>
-              confirm(`Undo all changes to ${cp.files} file(s) in ${cp.folder} since this checkpoint? Running agents in this chat are stopped first.`) &&
-              api.restoreCheckpoint(m.id).catch((e) => alert(errMsg(e)))
-            }
+            onClick={async () => {
+              const others = await api.checkpointConflicts(m.id);
+              const warn = others.length
+                ? `\n\n⚠️ Agents in other chats also edited this folder since the checkpoint (${others.map((t) => `"${t}"`).join(', ')}). Their changes will be undone too.`
+                : '';
+              if (confirm(`Undo all changes to ${cp.files} file(s) in ${cp.folder} since this checkpoint? Agents working in this chat, or editing this folder, are stopped first.${warn}`)) {
+                api.restoreCheckpoint(m.id).catch((e) => alert(errMsg(e)));
+              }
+            }}
           >
             ↩︎ Undo
           </button>
@@ -633,8 +656,22 @@ function Composer({ state, chat, live, run, focusKey = 0 }: { state: AppState; c
   );
 }
 
-function PauseBar({ state, run }: { state: AppState; run: <T>(f: () => Promise<T>) => Promise<T | undefined> }) {
+function PauseBar({ state, run, chat }: { state: AppState; run: <T>(f: () => Promise<T>) => Promise<T | undefined>; chat?: Chat }) {
   const s = state.settings;
+  const project = state.projects.find((p) => p.id === chat?.projectId);
+  if (!s.paused && project?.paused) {
+    return (
+      <div className="pausebar">
+        <span>
+          <strong>{project.name}</strong> is paused
+          {project.pauseReason === 'daily_cap' ? `: its daily limit of ${project.dailyTurnCap} turns is used` : ''}. Other projects keep going; messages here wait.
+        </span>
+        <button onClick={() => run(() => api.updateProject(project.id, project.pauseReason === 'daily_cap' ? { paused: false, dailyTurnCap: 0 } : { paused: false }))}>
+          {project.pauseReason === 'daily_cap' ? 'Remove limit & resume' : 'Resume project'}
+        </button>
+      </div>
+    );
+  }
   if (!s.paused) return null;
   const resets = state.usage.fiveHour?.resetsAt ? new Date(state.usage.fiveHour.resetsAt * 1000).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' }) : '';
   const why = {
@@ -694,6 +731,7 @@ function ProjectPage(p: {
         <span className="folder-big">📂</span>
         <input className="title-input" value={name} onChange={(e) => setName(e.target.value)} onBlur={() => name.trim() !== project.name && run(() => api.updateProject(project.id, { name }))} />
         <div className="spacer" />
+        <button onClick={() => run(() => api.updateProject(project.id, { paused: !project.paused }))}>{project.paused ? '▶ Resume project' : '❚❚ Pause project'}</button>
         <button className="danger" onClick={() => confirm(`Delete "${project.name}" and its ${chats.length} chats? Your folders and files are not touched.`) && run(() => api.deleteProject(project.id)).then(p.closed)}>
           Delete project
         </button>
@@ -784,6 +822,8 @@ function ProjectPage(p: {
             />
           </section>
 
+          <ProjectLimits state={state} project={project} run={run} />
+
           <section className="card">
             <div className="card-head">
               <h4>Chats</h4>
@@ -795,6 +835,158 @@ function ProjectPage(p: {
                 <span className="muted small">{new Date(c.updatedAt).toLocaleDateString([], { month: 'short', day: 'numeric' })}</span>
               </button>
             ))}
+          </section>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function ProjectLimits({ state, project, run }: { state: AppState; project: Project; run: <T>(f: () => Promise<T>) => Promise<T | undefined> }) {
+  const [cap, setCap] = useState(String(project.dailyTurnCap ?? 0));
+  const used = state.usage.projectTurns?.[project.id] ?? 0;
+  const cost = state.usage.projectCost?.[project.id] ?? 0;
+  return (
+    <section className="card">
+      <div className="card-head">
+        <h4>Usage & limits</h4>
+        {project.paused && <span className="tag">{project.pauseReason === 'daily_cap' ? 'paused: limit reached' : 'paused'}</span>}
+      </div>
+      <div className="field-row">
+        <label>
+          Turns per day in this project
+          <input
+            type="number"
+            min={0}
+            value={cap}
+            onChange={(e) => setCap(e.target.value)}
+            onBlur={() => Number(cap) !== (project.dailyTurnCap ?? 0) && run(() => api.updateProject(project.id, { dailyTurnCap: Number(cap) }))}
+          />
+        </label>
+        <div className="muted small">
+          Today: <strong>{used}</strong>
+          {project.dailyTurnCap ? ` / ${project.dailyTurnCap}` : ''} turns, ≈${cost.toFixed(2)} API-equivalent. 0 = no project limit (the global {state.settings.dailyTurnCap || '∞'}/day
+          still applies). When the limit is hit only this project pauses; it resumes tomorrow.
+        </div>
+      </div>
+    </section>
+  );
+}
+
+// ------------------------------------------------------------------ activity (all projects)
+
+function ActivityPage(p: { state: AppState; live: LiveStatus[]; run: <T>(f: () => Promise<T>) => Promise<T | undefined>; openChat: (id: string) => void; openProject: (id: string) => void }) {
+  const { state, live, run } = p;
+  const [view, setView] = useState<ActivityView | null>(null);
+  const [, tick] = useState(0);
+  useEffect(() => {
+    api.getActivityView().then(setView);
+  }, [state, live]);
+  useEffect(() => {
+    const t = setInterval(() => tick((x) => x + 1), 1000);
+    return () => clearInterval(t);
+  }, []);
+  if (!view) return null;
+  const agent = (id: string) => state.agents.find((a) => a.id === id);
+  const chatTitle = (id: string) => state.chats.find((c) => c.id === id)?.title ?? 'Deleted chat';
+  const projectName = (id: string) => state.projects.find((x) => x.id === id)?.name ?? '';
+  const ago = (ts: number) => {
+    const s = Math.max(0, Math.round((Date.now() - ts) / 1000));
+    return s < 60 ? `${s}s` : s < 3600 ? `${Math.floor(s / 60)}m ${s % 60}s` : `${Math.floor(s / 3600)}h ${Math.floor((s % 3600) / 60)}m`;
+  };
+  const row = (r: (typeof view.running)[number], running: boolean) => {
+    const a = agent(r.agentId);
+    return (
+      <div key={r.chatId + r.agentId} className="act-row" onClick={() => p.openChat(r.chatId)}>
+        <Avatar agent={a} size={26} />
+        <div className="act-main">
+          <div>
+            <strong style={nameStyle(a)}>{a?.name ?? '?'}</strong> <span className="muted">in</span> {r.projectId ? <span className="proj">📁 {projectName(r.projectId)}</span> : null}{' '}
+            <span className="chat-t">{chatTitle(r.chatId)}</span>
+          </div>
+          <div className={`muted small ${running ? 'live-step' : ''}`}>{r.detail}</div>
+        </div>
+        <span className="muted small">{ago(r.since)}</span>
+        {running && (
+          <button className="mini" onClick={(e) => (e.stopPropagation(), run(() => api.stopChat(r.chatId)))} title="Stop this chat">
+            ■
+          </button>
+        )}
+      </div>
+    );
+  };
+  const u = state.usage;
+  const s = state.settings;
+  return (
+    <div className="project-page">
+      <header className="topbar drag">
+        <span className="folder-big">⚡</span>
+        <h3>Activity</h3>
+        <div className="spacer" />
+        <button onClick={() => run(() => api.updateSettings({ paused: !s.paused }))}>{s.paused ? '▶ Resume all' : '❚❚ Pause all'}</button>
+      </header>
+      <PauseBar state={state} run={run} />
+      <div className="project-scroll">
+        <div className="column">
+          <section className="card">
+            <div className="card-head">
+              <h4>Running now</h4>
+              <span className="muted small">
+                {view.running.length} of {s.maxConcurrent} slots
+              </span>
+            </div>
+            {!view.running.length && <div className="muted small">Nothing running.</div>}
+            {view.running.map((r) => row(r, true))}
+          </section>
+          <section className="card">
+            <div className="card-head">
+              <h4>Queued</h4>
+            </div>
+            {!view.queued.length && <div className="muted small">Nothing waiting.</div>}
+            {view.queued.map((r) => row(r, false))}
+          </section>
+          <section className="card">
+            <div className="card-head">
+              <h4>Today by project</h4>
+              <span className="muted small">
+                {u.turnsToday}
+                {s.dailyTurnCap ? ` / ${s.dailyTurnCap}` : ''} turns · 5-hour usage {u.fiveHour ? `${pct(u.fiveHour.utilization)}%` : '-'}
+              </span>
+            </div>
+            <table className="usage-table">
+              <thead>
+                <tr>
+                  <th>Project</th>
+                  <th>Turns</th>
+                  <th>≈ API $</th>
+                  <th />
+                </tr>
+              </thead>
+              <tbody>
+                {view.projects
+                  .filter((x) => x.projectId || x.turnsToday)
+                  .map((x) => (
+                    <tr key={x.projectId || 'other'}>
+                      <td>{x.projectId ? <a onClick={() => p.openProject(x.projectId)}>📁 {x.name}</a> : <span className="muted">{x.name}</span>}</td>
+                      <td>
+                        {x.turnsToday}
+                        {x.cap ? <span className="muted"> / {x.cap}</span> : null}
+                        <div className="bar thin">
+                          <div style={{ width: `${Math.min(100, (x.turnsToday / (x.cap || Math.max(1, u.turnsToday))) * 100)}%` }} className={x.cap && x.turnsToday >= x.cap ? 'hot' : ''} />
+                        </div>
+                      </td>
+                      <td>{x.costToday.toFixed(2)}</td>
+                      <td className="right">
+                        {x.projectId && (
+                          <button className="mini" onClick={() => run(() => api.updateProject(x.projectId, x.paused ? (x.pauseReason === 'daily_cap' ? { paused: false, dailyTurnCap: 0 } : { paused: false }) : { paused: true }))}>
+                            {x.paused ? '▶ Resume' : '❚❚ Pause'}
+                          </button>
+                        )}
+                      </td>
+                    </tr>
+                  ))}
+              </tbody>
+            </table>
           </section>
         </div>
       </div>

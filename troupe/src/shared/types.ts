@@ -36,6 +36,8 @@ export interface Agent {
 /** Who may read a project's folders. Agents with the "files" or "full" capability always can. */
 export type ProjectReadAccess = 'lead' | 'all' | 'none';
 
+export type ProjectPatch = Partial<Pick<Project, 'name' | 'folders' | 'instructions' | 'readAccess' | 'paused' | 'dailyTurnCap'>>;
+
 /** A group of chats that share attached folders and instructions. */
 export interface Project {
   id: string;
@@ -47,6 +49,11 @@ export interface Project {
   readAccess: ProjectReadAccess;
   /** Bumped when folders or instructions change, so open chats are re-briefed. */
   version: number;
+  /** Nothing new starts in this project's chats while paused. */
+  paused?: boolean;
+  pauseReason?: '' | 'user' | 'daily_cap';
+  /** Max agent turns per day in this project. 0 = no limit (the global cap still applies). */
+  dailyTurnCap?: number;
   createdAt: number;
   updatedAt: number;
 }
@@ -75,6 +82,8 @@ export interface Chat {
   quick?: boolean;
   /** Folders already checkpointed (or found not to be git repos) in this chat. */
   checkpointed?: string[];
+  /** Folder -> when an agent that can edit files last worked on it in this chat. */
+  editedFolders?: Record<string, number>;
   createdAt: number;
   updatedAt: number;
 }
@@ -142,6 +151,9 @@ export interface UsageWindow {
 export interface Usage {
   day: string;
   turnsToday: number;
+  /** Today's turns and API-equivalent cost per project id ("" = chats outside projects). */
+  projectTurns?: Record<string, number>;
+  projectCost?: Record<string, number>;
   fiveHour?: UsageWindow;
   sevenDay?: UsageWindow;
   updatedAt: number;
@@ -169,6 +181,32 @@ export interface LiveStatus {
   since: number;
 }
 
+/** One row of the Activity view: an agent working, or waiting, in a chat. */
+export interface ActivityRow {
+  chatId: string;
+  agentId: string;
+  projectId: string;
+  /** Latest step while running; why it's waiting while queued. */
+  detail: string;
+  since: number;
+}
+
+export interface ProjectUsageRow {
+  projectId: string;
+  name: string;
+  turnsToday: number;
+  costToday: number;
+  cap: number;
+  paused: boolean;
+  pauseReason: string;
+}
+
+export interface ActivityView {
+  running: ActivityRow[];
+  queued: ActivityRow[];
+  projects: ProjectUsageRow[];
+}
+
 export type AgentDraft = Pick<Agent, 'name' | 'emoji' | 'hue' | 'persona' | 'model' | 'capability' | 'isLead'>;
 
 /** The API the preload script exposes to the renderer as window.troupe. */
@@ -185,7 +223,11 @@ export interface TroupeApi {
   searchFiles(chatId: string, query: string): Promise<{ label: string; insert: string }[]>;
   moveChat(chatId: string, projectId: string): Promise<void>;
   createProject(name: string, folders: string[]): Promise<Project>;
-  updateProject(id: string, patch: Partial<Pick<Project, 'name' | 'folders' | 'instructions' | 'readAccess'>>): Promise<void>;
+  updateProject(id: string, patch: ProjectPatch): Promise<void>;
+  /** What's running and queued across all projects, and today's usage per project. */
+  getActivityView(): Promise<ActivityView>;
+  /** Titles of other chats whose agents may have edited this checkpoint's folder since it was saved. */
+  checkpointConflicts(messageId: string): Promise<string[]>;
   deleteProject(id: string): Promise<void>;
   /** Pick folders with the system dialog. */
   chooseDirectories(): Promise<string[]>;

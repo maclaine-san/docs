@@ -58,7 +58,8 @@ const draft = (name: string, extra: Partial<AgentDraft> = {}): AgentDraft => ({
 
 async function idle(orch: Orchestrator) {
   for (let i = 0; i < 400; i++) {
-    if (!orch.isBusy() && (!orch.state.inbox.length || orch.state.settings.paused)) return;
+    // Idle = nothing running and nothing that could start (paused work stays queued on purpose).
+    if (!orch.isBusy() && (orch.state.settings.paused || orch.activityView().queued.every((q) => /paused/i.test(q.detail)))) return;
     await new Promise((r) => setTimeout(r, 5));
   }
   throw new Error('never went idle');
@@ -547,4 +548,126 @@ test('answering the asker with "@Asker done" does not wake the answerer again', 
   orch.userMessage(chat.id, 'go');
   await idle(orch);
   assert.deepEqual(runner.calls.map((c) => c.agent), ['Chief', 'CTO', 'Chief']);
+});
+
+// ------------------------------------------------------------------ multiple projects
+
+test('only one editing agent per folder at a time; other projects and chat-only agents run in parallel', async () => {
+  const active = new Map<string, number>();
+  let maxSameFolder = 0;
+  let maxTotal = 0;
+  let total = 0;
+  const { orch, runner } = setup(async (req, name) => {
+    const editing = name.startsWith('Dev');
+    total++;
+    maxTotal = Math.max(maxTotal, total);
+    if (editing) {
+      active.set(req.cwd, (active.get(req.cwd) ?? 0) + 1);
+      maxSameFolder = Math.max(maxSameFolder, active.get(req.cwd)!);
+    }
+    await new Promise((r) => setTimeout(r, 40));
+    if (editing) active.set(req.cwd, active.get(req.cwd)! - 1);
+    total--;
+    return ok('done');
+  });
+  orch.updateSettings({ maxConcurrent: 4 });
+  orch.addAgent(draft('Lead', { isLead: true }));
+  orch.addAgent(draft('Dev1', { capability: 'code' }));
+  orch.addAgent(draft('Dev2', { capability: 'files' }));
+  const a = orch.createProject('A', [tmpDir('a')]);
+  const b = orch.createProject('B', [tmpDir('b')]);
+  const a1 = orch.newChat('group', a.id);
+  orch.userMessage(a1.id, 'x');
+  const a2 = orch.newChat('group', a.id);
+  const b1 = orch.newChat('group', b.id);
+  orch.userMessage(a1.id, '@Dev1 edit');
+  orch.userMessage(a2.id, '@Dev2 edit');
+  orch.userMessage(b1.id, '@Dev1 edit');
+  await new Promise((r) => setTimeout(r, 15));
+  const waiting = orch.activityView().queued.find((q) => q.chatId === a2.id);
+  assert.match(waiting?.detail ?? '', /editing the same folder/);
+  await idle(orch);
+  assert.equal(maxSameFolder, 1, 'never two editors in one folder');
+  assert.ok(maxTotal >= 2, 'project B and the chat-only lead ran in parallel');
+  assert.equal(runner.calls.filter((c) => c.agent.startsWith('Dev')).length, 3);
+});
+
+test('pausing one project holds its chats while other projects keep going', async () => {
+  const { orch, runner } = setup(() => ok('ok'));
+  orch.addAgent(draft('Lead', { isLead: true }));
+  const a = orch.createProject('A', []);
+  const b = orch.createProject('B', []);
+  const ca = orch.newChat('group', a.id);
+  const cb = orch.newChat('group', b.id);
+  orch.updateProject(a.id, { paused: true });
+  orch.userMessage(ca.id, 'in A');
+  orch.userMessage(cb.id, 'in B');
+  await idle(orch);
+  assert.equal(runner.calls.length, 1);
+  assert.match(runner.calls[0].req.prompt, /in B/);
+  assert.equal(orch.activityView().queued[0].detail, 'Project paused');
+  orch.updateProject(a.id, { paused: false });
+  await idle(orch);
+  assert.equal(runner.calls.length, 2);
+});
+
+test('a per-project daily limit pauses only that project, with per-project usage tracked', async () => {
+  const { orch, runner } = setup(() => ({ ok: true, text: 'ok', costUsd: 0.05 }));
+  orch.addAgent(draft('Lead', { isLead: true }));
+  const a = orch.createProject('A', []);
+  const b = orch.createProject('B', []);
+  orch.updateProject(a.id, { dailyTurnCap: 1 });
+  const ca = orch.newChat('group', a.id);
+  const cb = orch.newChat('group', b.id);
+  orch.userMessage(ca.id, 'one');
+  await idle(orch);
+  orch.userMessage(ca.id, 'two');
+  orch.userMessage(cb.id, 'b one');
+  orch.userMessage(cb.id, 'b two');
+  await idle(orch);
+  const pa = orch.state.projects.find((p) => p.id === a.id)!;
+  assert.equal(pa.paused, true);
+  assert.equal(pa.pauseReason, 'daily_cap');
+  assert.ok(orch.state.messages.some((m) => m.chatId === ca.id && /daily limit of 1 turns/.test(m.text)));
+  assert.equal(orch.state.settings.paused, false, 'the rest of the team keeps going');
+  const view = orch.activityView();
+  const row = (id: string) => view.projects.find((p) => p.projectId === id)!;
+  assert.equal(row(a.id).turnsToday, 1);
+  assert.equal(row(b.id).turnsToday, 2, 'B is unaffected by A\'s limit');
+  assert.ok(Math.abs(row(a.id).costToday - 0.05) < 1e-9);
+  // Raising the limit resumes it.
+  orch.updateProject(a.id, { dailyTurnCap: 5 });
+  await idle(orch);
+  assert.equal(pa.paused, false);
+  assert.equal(runner.calls.length, 4, "A's held message runs once the limit is raised");
+});
+
+test('undo warns about other chats that edited the same folder, and stops them', async () => {
+  let slow = false;
+  const { orch } = setup(async (req, name) => {
+    if (name === 'Dev') fs.appendFileSync(path.join(req.cwd, 'f.txt'), `${name}\n`);
+    if (slow) await new Promise((r) => setTimeout(r, 200));
+    return ok('done');
+  });
+  orch.addAgent(draft('Dev', { isLead: true, capability: 'code' }));
+  const dir = tmpDir('undo');
+  execFileSync('git', ['init', '-q'], { cwd: dir });
+  const p = orch.createProject('P', [dir]);
+  const c1 = orch.newChat('group', p.id);
+  orch.userMessage(c1.id, 'first');
+  await idle(orch);
+  const c2 = orch.newChat('group', p.id);
+  orch.userMessage(c2.id, 'second');
+  await idle(orch);
+  const cp1 = orch.state.messages.find((m) => m.chatId === c1.id && m.checkpoint)!;
+  assert.deepEqual(orch.checkpointConflicts(cp1.id), ['second']);
+  assert.equal(cp1.checkpoint!.files, 1);
+
+  slow = true;
+  orch.userMessage(c2.id, 'third');
+  await new Promise((r) => setTimeout(r, 30));
+  assert.equal(orch.isBusy(), true);
+  orch.restoreCheckpoint(cp1.id);
+  assert.equal(orch.isBusy(), false, "the other chat's editor was stopped");
+  assert.ok(orch.state.messages.some((m) => m.chatId === c2.id && /rolled back from another chat/.test(m.text)));
 });

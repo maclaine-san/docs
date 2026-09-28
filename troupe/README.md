@@ -6,9 +6,13 @@ It runs on your **Claude Pro/Max subscription** through the official Claude Code
 
 ![Group chat](docs/chat.png)
 
-| Menu-bar quick chat (⌥Space) | @file mentions | Project |
+| Activity across projects | Menu-bar quick chat (⌥Space) | @file mentions |
 |---|---|---|
-| ![](docs/quick-chat.png) | ![](docs/file-mention.png) | ![](docs/project.png) |
+| ![](docs/activity.png) | ![](docs/quick-chat.png) | ![](docs/file-mention.png) |
+
+| Project |
+|---|
+| ![](docs/project.png) |
 
 | Chat in a project | @mentions | Usage controls |
 |---|---|---|
@@ -75,6 +79,12 @@ npm run dist:mac     # optional: unsigned .dmg/.app in release/
   - Saving the checkpoint never touches your branch, staged files or commit history. It's stored under `refs/troupe/`, and files git ignores are left alone.
   - Folders that aren't git repositories get a one-time note instead.
   - You can turn this off in Settings.
+- **Several projects at once:**
+  - Each chat is isolated: separate agent sessions, its own folder, instructions and `@files`. The same agent can work in several projects at once.
+  - **Only one editing agent per folder at a time.** If two chats want to change the same folder, the second waits ("CTO is editing the same folder") and then continues. Chat-only and research agents, and other projects, keep running in parallel.
+  - **⚡ Activity** (sidebar) shows what is running in every project, what is queued and *why* (free slot, waiting for a teammate's answer, folder busy, project paused), and today's turns and ≈cost per project. It has Stop, Pause and Resume buttons.
+  - **Per-project pause and daily turn limit** (project page or Activity). When a project hits its limit, only that project pauses and the rest keep going. It resumes the next day, or when you raise the limit.
+  - **Undo is multi-chat aware.** If agents in another chat edited the same folder since the checkpoint, Undo warns you first, and stops anyone editing that folder before rolling back.
 - **Hand-offs:** an agent hands work to a teammate by starting a line with `@Name`. Mentions in the middle of a sentence ("as @CTO's fix shows") don't wake anyone, and answering the agent who asked ("@Chief Done") doesn't count as a new request. Your own `@mentions` work anywhere in a message.
 
 ## Staying light on usage

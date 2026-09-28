@@ -5,7 +5,7 @@ const call = (method: string) => (...args: unknown[]) => ipcRenderer.invoke('tro
 const methods = [
   'getState', 'getLive', 'addAgent', 'updateAgent', 'removeAgent', 'newChat', 'moveChat', 'setChatTarget', 'renameChat',
   'deleteChat', 'sendMessage', 'stopChat', 'updateSettings', 'checkClaude', 'chooseDirectory', 'chooseDirectories',
-  'createProject', 'updateProject', 'deleteProject', 'showInFinder', 'searchFiles', 'openInMain', 'hideQuick', 'shortcutStatus', 'restoreCheckpoint',
+  'createProject', 'updateProject', 'deleteProject', 'showInFinder', 'searchFiles', 'openInMain', 'hideQuick', 'shortcutStatus', 'restoreCheckpoint', 'checkpointConflicts', 'getActivityView',
 ] as const;
 
 const api = Object.fromEntries(methods.map((m) => [m, call(m)])) as unknown as TroupeApi;

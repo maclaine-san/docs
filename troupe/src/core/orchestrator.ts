@@ -1,7 +1,7 @@
 import { EventEmitter } from 'node:events';
 import { randomUUID } from 'node:crypto';
 import fs from 'node:fs';
-import type { Agent, AgentDraft, AppState, Chat, InboxItem, LiveStatus, Message, Project, Seat, Settings } from '../shared/types';
+import type { ActivityRow, ActivityView, Agent, AgentDraft, AppState, Chat, InboxItem, LiveStatus, Message, Project, ProjectPatch, Seat, Settings } from '../shared/types';
 import path from 'node:path';
 import { USER_ID, SYSTEM_ID, canEditFiles } from '../shared/types';
 import { today, type Store } from './store';
@@ -27,6 +27,8 @@ interface Running {
   handle: TurnHandle;
   chatId: string;
   agentId: string;
+  /** Folders this turn may edit. Only one editing turn per folder runs at a time. */
+  editFolders: string[];
 }
 
 const seatKey = (chatId: string, agentId: string) => `${chatId}:${agentId}`;
@@ -270,8 +272,20 @@ export class Orchestrator extends EventEmitter {
     return p;
   }
 
-  updateProject(id: string, patch: Partial<Pick<Project, 'name' | 'folders' | 'instructions' | 'readAccess'>>): void {
+  updateProject(id: string, patch: ProjectPatch): void {
     const p = this.project(id);
+    if (patch.paused !== undefined) {
+      p.paused = patch.paused;
+      p.pauseReason = patch.paused ? 'user' : '';
+    }
+    if (patch.dailyTurnCap !== undefined) {
+      p.dailyTurnCap = Math.max(0, Math.floor(Number(patch.dailyTurnCap) || 0));
+      // Raising the limit past today's usage lifts a cap pause.
+      if (p.pauseReason === 'daily_cap' && (!p.dailyTurnCap || this.projectTurns(p.id) < p.dailyTurnCap)) {
+        p.paused = false;
+        p.pauseReason = '';
+      }
+    }
     if (patch.name !== undefined) p.name = patch.name.trim() || p.name;
     if (patch.folders !== undefined) p.folders = this.checkFolders(patch.folders);
     if (patch.instructions !== undefined) p.instructions = patch.instructions;
@@ -279,6 +293,11 @@ export class Orchestrator extends EventEmitter {
     if (patch.folders !== undefined || patch.instructions !== undefined || patch.readAccess !== undefined) p.version++;
     p.updatedAt = Date.now();
     this.changed();
+    this.schedule();
+  }
+
+  private projectTurns(projectId: string): number {
+    return this.state.usage.projectTurns?.[projectId] ?? 0;
   }
 
   /** Deletes the project and its chats. Never touches the folders on disk. */
@@ -406,6 +425,14 @@ export class Orchestrator extends EventEmitter {
     if (u.day !== today()) {
       u.day = today();
       u.turnsToday = 0;
+      u.projectTurns = {};
+      u.projectCost = {};
+      for (const p of this.state.projects) {
+        if (p.paused && p.pauseReason === 'daily_cap') {
+          p.paused = false;
+          p.pauseReason = '';
+        }
+      }
       if (s.paused && s.pauseReason === 'daily_cap') s.paused = false;
     }
     if (s.paused && s.pauseReason === 'usage_limit') {
@@ -422,6 +449,37 @@ export class Orchestrator extends EventEmitter {
     return (this.pending.get(seatKey(chatId, agentId))?.size ?? 0) > 0;
   }
 
+  /** Folders an agent's turn in this chat may edit (empty if it can't edit files). */
+  private editFoldersFor(chat: Chat, agent: Agent): string[] {
+    if (!canEditFiles(agent.capability)) return [];
+    const project = this.state.projects.find((p) => p.id === chat.projectId);
+    return project?.folders.length ? project.folders : [this.state.settings.workspaceDir];
+  }
+
+  /** Why a queued agent can't start yet, or "" if it can (apart from free slots and caps). */
+  private whyWaiting(chatId: string, agentId: string): string {
+    const chat = this.state.chats.find((c) => c.id === chatId);
+    const agent = this.state.agents.find((a) => a.id === agentId);
+    if (!chat || !agent) return 'Gone';
+    if (this.running.has(seatKey(chatId, agentId))) return 'Finishing its current turn in this chat';
+    const project = this.state.projects.find((p) => p.id === chat.projectId);
+    if (project?.paused) return project.pauseReason === 'daily_cap' ? `Project paused: daily limit of ${project.dailyTurnCap} turns used` : 'Project paused';
+    const waitingOn = [...(this.pending.get(seatKey(chatId, agentId)) ?? [])];
+    if (waitingOn.length) {
+      return `Waiting for ${waitingOn.map((id) => this.state.agents.find((a) => a.id === id)?.name ?? 'a teammate').join(' and ')} to answer`;
+    }
+    const folders = this.editFoldersFor(chat, agent);
+    if (folders.length) {
+      for (const r of this.running.values()) {
+        if (!r.editFolders.some((f) => folders.includes(f))) continue;
+        const who = this.state.agents.find((a) => a.id === r.agentId)?.name ?? 'Another agent';
+        const where = this.state.chats.find((c) => c.id === r.chatId)?.title ?? 'another chat';
+        return `Waiting: ${who} is editing the same folder (in "${where}")`;
+      }
+    }
+    return '';
+  }
+
   schedule(): void {
     this.autoResume();
     const s = this.state.settings;
@@ -432,7 +490,16 @@ export class Orchestrator extends EventEmitter {
       const k = seatKey(item.chatId, item.agentId);
       if (seen.has(k)) continue;
       seen.add(k);
-      if (this.running.has(k) || this.blocked(item.chatId, item.agentId)) continue;
+      if (this.whyWaiting(item.chatId, item.agentId)) continue;
+      const chat = this.state.chats.find((c) => c.id === item.chatId)!;
+      const project = this.state.projects.find((p) => p.id === chat.projectId);
+      if (project?.dailyTurnCap && this.projectTurns(project.id) >= project.dailyTurnCap) {
+        project.paused = true;
+        project.pauseReason = 'daily_cap';
+        this.note(item.chatId, `Paused **${project.name}**: it has used its daily limit of ${project.dailyTurnCap} turns. Other projects keep going. Raise the limit or resume it on the project page.`);
+        this.changed();
+        continue;
+      }
       if (s.dailyTurnCap && this.state.usage.turnsToday >= s.dailyTurnCap) {
         this.pause('daily_cap');
         this.note(item.chatId, `Paused: the team has used today's limit of ${s.dailyTurnCap} turns. It resumes tomorrow, or you can raise the limit in Settings and press Resume.`);
@@ -441,6 +508,45 @@ export class Orchestrator extends EventEmitter {
       }
       this.startTurn(item.chatId, item.agentId);
     }
+  }
+
+  /** What's running and waiting across all chats, and today's usage per project. */
+  activityView(): ActivityView {
+    const running: ActivityRow[] = [...this.running.entries()].map(([k, r]) => ({
+      chatId: r.chatId,
+      agentId: r.agentId,
+      projectId: this.state.chats.find((c) => c.id === r.chatId)?.projectId ?? '',
+      detail: this.live.get(k)?.step || 'Thinking',
+      since: this.live.get(k)?.since ?? Date.now(),
+    }));
+    const queued: ActivityRow[] = [];
+    const seen = new Set<string>();
+    for (const i of this.state.inbox) {
+      const k = seatKey(i.chatId, i.agentId);
+      if (seen.has(k)) continue;
+      seen.add(k);
+      const msg = this.state.messages.find((m) => m.id === i.messageId);
+      const s = this.state.settings;
+      const detail =
+        (s.paused ? 'Team paused' : '') ||
+        this.whyWaiting(i.chatId, i.agentId) ||
+        (this.running.size >= s.maxConcurrent ? `Waiting for a free slot (${s.maxConcurrent} agents at once)` : 'Starting…');
+      queued.push({ chatId: i.chatId, agentId: i.agentId, projectId: this.state.chats.find((c) => c.id === i.chatId)?.projectId ?? '', detail, since: msg?.ts ?? Date.now() });
+    }
+    const u = this.state.usage;
+    const projects = [
+      ...this.state.projects.map((p) => ({
+        projectId: p.id,
+        name: p.name,
+        turnsToday: u.projectTurns?.[p.id] ?? 0,
+        costToday: u.projectCost?.[p.id] ?? 0,
+        cap: p.dailyTurnCap ?? 0,
+        paused: Boolean(p.paused),
+        pauseReason: p.pauseReason ?? '',
+      })),
+      { projectId: '', name: 'Other chats', turnsToday: u.projectTurns?.[''] ?? 0, costToday: u.projectCost?.[''] ?? 0, cap: 0, paused: false, pauseReason: '' },
+    ];
+    return { running, queued, projects };
   }
 
   private seat(chat: Chat, agentId: string): Seat {
@@ -493,7 +599,12 @@ export class Orchestrator extends EventEmitter {
     } catch {
       /* the CLI reports it if it matters */
     }
-    if (!retried) this.state.usage.turnsToday++;
+    if (!retried) {
+      this.state.usage.turnsToday++;
+      const pt = (this.state.usage.projectTurns ??= {});
+      pt[chat.projectId] = (pt[chat.projectId] ?? 0) + 1;
+    }
+    const editFolders = this.editFoldersFor(chat, agent);
 
     this.live.set(k, { chatId, agentId, step: '', since: Date.now() });
     this.emitLive();
@@ -523,7 +634,7 @@ export class Orchestrator extends EventEmitter {
         onUsage: (u) => this.recordUsage(u),
       },
     );
-    this.running.set(k, { handle, chatId, agentId });
+    this.running.set(k, { handle, chatId, agentId, editFolders });
     this.changed();
 
     handle.done.then((res) => {
@@ -537,7 +648,13 @@ export class Orchestrator extends EventEmitter {
       if (!a || !c) return this.schedule();
       a.turns++;
       a.costUsd += res.costUsd;
-      if (canEditFiles(a.capability)) this.refreshCheckpointNotes(c);
+      const pc = (this.state.usage.projectCost ??= {});
+      pc[c.projectId] = (pc[c.projectId] ?? 0) + res.costUsd;
+      if (editFolders.length) {
+        c.editedFolders ??= {};
+        for (const f of editFolders) c.editedFolders[f] = Date.now();
+        this.refreshAllCheckpointNotes(editFolders);
+      }
 
       if (res.ok) {
         seat.started = true;
@@ -596,10 +713,10 @@ export class Orchestrator extends EventEmitter {
       : `📌 Checkpoint of ${name} saved before agents edit it. You can undo their changes from here.`;
   }
 
-  /** Update each checkpoint note in the chat with what has changed since. */
-  private refreshCheckpointNotes(chat: Chat): void {
+  /** Update checkpoint notes (in every chat) for these folders with what has changed since. */
+  private refreshAllCheckpointNotes(folders: string[]): void {
     for (const m of this.state.messages) {
-      if (m.chatId !== chat.id || !m.checkpoint) continue;
+      if (!m.checkpoint || !folders.includes(m.checkpoint.folder)) continue;
       try {
         const st = changesSince(m.checkpoint.folder, m.checkpoint.sha);
         m.checkpoint.files = st.files;
@@ -610,14 +727,31 @@ export class Orchestrator extends EventEmitter {
     }
   }
 
-  /** Undo: put the folder back to the checkpoint. Stops the chat first so nobody is mid-edit. */
+  /** Other chats whose editing agents worked on this checkpoint's folder after it was saved. */
+  checkpointConflicts(messageId: string): string[] {
+    const m = this.state.messages.find((x) => x.id === messageId);
+    if (!m?.checkpoint) return [];
+    const folder = m.checkpoint.folder;
+    return this.state.chats
+      .filter((c) => c.id !== m.chatId && (c.editedFolders?.[folder] ?? 0) > m.ts)
+      .map((c) => c.title);
+  }
+
+  /** Undo: put the folder back to the checkpoint. Stops this chat, and anyone editing the folder, first. */
   restoreCheckpoint(messageId: string): void {
     const m = this.state.messages.find((x) => x.id === messageId);
     if (!m?.checkpoint) throw new UserError('That checkpoint no longer exists.');
     this.stopChat(m.chatId);
+    for (const [k, r] of [...this.running]) {
+      if (!r.editFolders.includes(m.checkpoint.folder)) continue;
+      r.handle.cancel();
+      this.running.delete(k);
+      this.live.delete(k);
+      this.note(r.chatId, `Stopped ${this.state.agents.find((a) => a.id === r.agentId)?.name ?? 'an agent'}: \`${path.basename(m.checkpoint.folder)}\` was rolled back from another chat.`);
+    }
+    this.emitLive();
     const st = restoreCheckpoint(m.checkpoint.folder, m.checkpoint.sha);
-    m.checkpoint.files = 0;
-    m.text = this.checkpointText(m.checkpoint.folder, 0, 0, 0);
+    this.refreshAllCheckpointNotes([m.checkpoint.folder]);
     // Visible to agents, so they know their earlier edits are gone.
     this.note(m.chatId, `↩︎ Undid all changes to \`${path.basename(m.checkpoint.folder)}\` since the checkpoint (${st.files} file${st.files === 1 ? '' : 's'}). Earlier edits in this chat no longer exist.`);
     this.changed();

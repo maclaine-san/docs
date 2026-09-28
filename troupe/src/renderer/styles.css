@@ -285,3 +285,22 @@ body.quick-mode { background: transparent; }
 .note.checkpoint { display: flex; align-items: center; justify-content: center; gap: 10px; flex-wrap: wrap; }
 .note.checkpoint p { margin: 0; }
 .undo { border: 1px solid var(--line); color: var(--text); font-size: 12px; }
+
+/* ---------- activity + limits */
+.side-nav { display: flex; align-items: center; gap: 8px; width: 100%; border: none; text-align: left; padding: 7px 10px; margin-top: 6px; border-radius: 8px; font-weight: 500; }
+.side-nav.active { background: var(--active); }
+.side-nav .count { margin-left: auto; font-size: 11px; color: var(--ok); font-weight: 600; }
+.paused-tag { font-size: 11px; color: var(--muted); }
+.act-row { display: flex; align-items: center; gap: 10px; padding: 7px 8px; margin: 0 -8px; border-radius: 9px; cursor: default; }
+.act-row:hover { background: var(--hover); }
+.act-main { flex: 1; min-width: 0; }
+.act-main > div { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.proj { font-size: 12.5px; border: 1px solid var(--line); border-radius: 999px; padding: 0 7px; }
+.chat-t { color: var(--muted); }
+.live-step { color: var(--ok); }
+.usage-table { width: 100%; border-collapse: collapse; font-size: 13px; }
+.usage-table th { text-align: left; font-weight: 600; color: var(--muted); font-size: 11.5px; padding: 4px 6px; border-bottom: 1px solid var(--line); }
+.usage-table td { padding: 7px 6px; border-bottom: 1px solid var(--line); vertical-align: middle; }
+.usage-table td a { cursor: default; text-decoration: none; }
+.usage-table .right { text-align: right; }
+.bar.thin { height: 3px; margin: 3px 0 0; max-width: 120px; }

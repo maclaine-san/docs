@@ -87,6 +87,13 @@ Measured: a chat-only turn is about 900 input tokens in lean mode, against about
 - [x] Git checkpoints before a chat's first edit (temporary index, `refs/troupe/`, branch and staging untouched), a live "N files changed" note and one-click Undo
 - [x] Benchmark: "Improve the SEO of my current project" with Chief, CTO and Researcher took 3 turns, ~$0.15, fixed everything with tests passing and no intervention (before: 4 turns, $0.61)
 
+**v0.6: Many projects at once**
+- [x] Folder edit lock: at most one editing turn per folder across all chats. Others queue with the reason shown.
+- [x] Per-project pause and daily turn limit (only that project pauses, and it resumes the next day), plus per-project turns and cost for today
+- [x] ⚡ Activity page: running and queued work across projects with the reason for each wait, per-project usage, and stop/pause/resume
+- [x] Undo warns when other chats edited the same folder since the checkpoint, and stops anyone editing it first
+- [x] Verified in the app with 3 chats in 2 projects: the edit lock serialized the two Brewly edits, Leafy paused at its 2-turn limit while Brewly continued, and both Brewly tasks landed (tests pass, footer added)
+
 **Next**
 - Attach files and images to a message
 - Voice input
