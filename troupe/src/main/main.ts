@@ -1,4 +1,4 @@
-import { app, BrowserWindow, dialog, globalShortcut, ipcMain, Menu, nativeImage, Notification, screen, shell, Tray } from 'electron';
+import { app, BrowserWindow, dialog, globalShortcut, ipcMain, Menu, nativeImage, nativeTheme, Notification, screen, shell, Tray } from 'electron';
 import path from 'node:path';
 import { Store } from '../core/store';
 import { Orchestrator } from '../core/orchestrator';
@@ -31,7 +31,7 @@ function createWindow(openChatId = '') {
     minHeight: 560,
     title: 'Troupe',
     titleBarStyle: process.platform === 'darwin' ? 'hiddenInset' : 'default',
-    backgroundColor: '#101114',
+    backgroundColor: nativeTheme.shouldUseDarkColors ? '#161618' : '#ffffff',
     webPreferences,
   });
   win.loadFile(path.join(__dirname, 'index.html'));
@@ -47,6 +47,16 @@ function showMain(chatId = '') {
   win.show();
   win.focus();
   if (chatId) win.webContents.send('open-chat', chatId);
+}
+
+/**
+ * Light/dark: setting nativeTheme makes prefers-color-scheme follow it in
+ * every window, and also switches native parts (dialogs, scrollbars, vibrancy).
+ */
+function applyTheme(theme: string) {
+  nativeTheme.themeSource = theme === 'light' || theme === 'dark' ? theme : 'system';
+  const bg = nativeTheme.shouldUseDarkColors ? '#161618' : '#ffffff';
+  win?.setBackgroundColor(bg);
 }
 
 // ---------------------------------------------------------------- quick chat (menu bar)
@@ -137,6 +147,18 @@ function trayMenu() {
     },
     { label: `${u.turnsToday}${s.dailyTurnCap ? ` / ${s.dailyTurnCap}` : ''} turns today`, enabled: false },
     { label: s.paused ? 'Resume team' : 'Pause team', click: () => orch.updateSettings({ paused: !s.paused }) },
+    {
+      label: 'Appearance',
+      submenu: (['system', 'light', 'dark'] as const).map((t) => ({
+        label: { system: 'Match macOS', light: 'Light', dark: 'Dark' }[t],
+        type: 'radio' as const,
+        checked: s.theme === t,
+        click: () => {
+          orch.updateSettings({ theme: t });
+          applyTheme(t);
+        },
+      })),
+    },
     { type: 'separator' },
     { label: 'Quit Troupe', role: 'quit' },
   ]);
@@ -236,6 +258,7 @@ async function main() {
     stopChat: async (c) => orch.stopChat(c),
     updateSettings: async (p) => {
       orch.updateSettings(p);
+      if (p.theme !== undefined) applyTheme(p.theme);
       if (p.quickShortcut !== undefined) registerShortcut(p.quickShortcut);
     },
     chooseDirectory: async () => {
@@ -260,6 +283,7 @@ async function main() {
     return fn(...args);
   });
 
+  applyTheme(orch.state.settings.theme);
   orch.start();
   createWindow();
   createTray();

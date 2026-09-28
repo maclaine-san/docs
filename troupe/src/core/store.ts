@@ -20,6 +20,7 @@ export function defaultSettings(dataDir: string): Settings {
     quickShortcut: 'Alt+Space',
     notifications: true,
     checkpoints: true,
+    theme: 'system',
   };
 }
 
