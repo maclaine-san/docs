@@ -1,0 +1,101 @@
+# Troupe: plan
+
+A **simple, chat-first** macOS app, in the spirit of Grok or a Muse-style companion app rather than an "AI company" dashboard. You chat with a small team of agents. Each has a name, emoji and personality. They answer in one thread and help each other when useful. It runs on a **Claude Pro/Max subscription**, not an API key, and is designed to use as few tokens as possible.
+
+## Principles
+
+1. **It's a chat.** No org charts, task boards or permission grids on screen. There's a chat list, agent tabs, a message box, and one settings sheet.
+2. **One voice by default.** Messages to the group go to the lead, who answers directly and only pulls others in when that clearly helps.
+3. **Cheap by default.** Every design choice is checked against "how many tokens does this add per turn?"
+
+## Using the subscription
+
+Each agent in each chat is a Claude Code session driven through the `claude` CLI you've already logged into:
+
+```
+claude -p --output-format stream-json --verbose
+       --session-id <uuid> | --resume <uuid>
+       --system-prompt "<short persona prompt>"      # lean mode
+       --disable-slash-commands --strict-mcp-config --setting-sources ""
+       --tools "" | "WebSearch,WebFetch" | …        # by capability
+       --model haiku|sonnet|opus
+```
+
+`ANTHROPIC_API_KEY` is removed from the child environment so an API key is never billed. Claude Code's `rate_limit_event` stream reports the 5-hour and weekly utilization, which drives the usage meter and the auto-pause.
+
+## UX
+
+```
+┌────────────┬─────────────────────────────────────────┐
+│ ◆ Troupe   │ [👥 Group] [✦ Nova] [🔎 Scout] [✍ Quill] [+] │
+│ ✎ New chat │─────────────────────────────────────────│
+│            │                 you: plan my newsletter │
+│ Today      │ ✦ Nova: names: … @Scout who reads plant │
+│ • Newsl…   │         content?                        │
+│ • Kyoto…   │ 🔎 Scout: 68% are millennials …          │
+│            │ ✦ Nova: here's the full package: …       │
+│ 5h ▓▓░ 23% │ ┌─────────────────────────────────────┐ │
+│ ⚙ Settings │ │ Message the group or @mention…    ↑ │ │
+└────────────┴─┴─────────────────────────────────────┴─┘
+```
+
+- Tabs choose who gets your message: the Group (the lead) or one agent. `@mentions` override the tab.
+- Live "thinking" rows show what each agent is doing, e.g. "Searching the web: …".
+- Sidebar: chat history (Today, Yesterday…), usage meter, settings.
+- Agent sheet: emoji and colour, name, "who are they?", model, what they can use, and a lead toggle.
+
+## How agents collaborate
+
+- An agent's reply is posted to the chat. If it `@mentions` teammates, each of them is woken with the request.
+- The asker **waits for all of them** and is then woken **once** with every answer. For example, three agents asked means one follow-up turn, not three.
+- A teammate that fails still releases the asker, so nobody waits forever.
+- Hop limit: every message carries its distance from your last message. Past the limit (default 6), mentions are not delivered.
+
+## Token budget per turn (lean mode)
+
+| Part | Size |
+|---|---|
+| Claude Code base (with `--system-prompt`, no tools) | ~800 tokens |
+| Persona + roster + rules | ~150–300 tokens |
+| New messages since the agent's last turn | ≤12 messages × ≤1,500 chars |
+| Tool definitions | 0 for chat-only agents; ~1.6k for web search; ~2.6k for read-only file access (projects) |
+
+Measured: a chat-only turn is about 900 input tokens in lean mode, against about 4,050 with Claude Code's default prompt.
+
+## Milestones
+
+**v0.2 (this PR)**
+- [x] Chat-first UI: chat history, agent tabs, @mention autocomplete, live thinking rows, stop, agent editor, settings sheet
+- [x] Orchestrator: per-chat sessions, @mention routing, wait-for-all answers, hop limit, concurrency limit
+- [x] Lean mode, daily turn cap, auto-pause on 5-hour usage (auto-resume at reset), usage meter
+- [x] Unit tests (fake runner), real CLI end-to-end, UI driven in Electron
+
+**v0.3: Projects**
+- [x] Projects with attached folders (first = working directory, the rest via `--add-dir`), shared instructions and per-project file access (lead / everyone / nobody)
+- [x] Project page: start a chat, manage folders (add, drop, show in Finder, detach), instructions, chat list; projects and their chats in the sidebar
+- [x] Move chats between projects; agents are re-briefed once when folders or instructions change; missing folders are reported instead of run
+
+**v0.4: @files and the menu bar**
+- [x] `@file` mentions: autocomplete from project folders, drag and drop of any file, contents inlined once per agent (30k chars per file, 60k per turn), binary files skipped, path traversal blocked, unknown files reported
+- [x] Menu-bar ◆ with a menu (quick chat, open, usage, pause, quit). Global shortcut (⌥Space by default, configurable) opens a floating quick chat. Esc hides it, ⌘N starts fresh, ↗ opens it in the main window. It stays alive when the window is closed.
+- [x] Notifications when an agent replies while Troupe is in the background; clicking one opens the chat
+- [x] Prompt fix: `@Name` is only used to hand off work now, so conditional mentions no longer wake teammates
+
+**v0.5: Autonomous coding tasks**
+- [x] "Code" capability: file tools plus an allowlist of test, build and read-only git commands, in the default permission mode. `acceptEdits` was found to auto-approve `rm` and `mv`, so it's no longer used anywhere.
+- [x] Strict hand-offs: only a line starting with `@Name` wakes a teammate, and "@Asker done" answers are delivered without triggering a new round
+- [x] Git checkpoints before a chat's first edit (temporary index, `refs/troupe/`, branch and staging untouched), a live "N files changed" note and one-click Undo
+- [x] Benchmark: "Improve the SEO of my current project" with Chief, CTO and Researcher took 3 turns, ~$0.15, fixed everything with tests passing and no intervention (before: 4 turns, $0.61)
+
+**v0.6: Many projects at once**
+- [x] Folder edit lock: at most one editing turn per folder across all chats. Others queue with the reason shown.
+- [x] Per-project pause and daily turn limit (only that project pauses, and it resumes the next day), plus per-project turns and cost for today
+- [x] ⚡ Activity page: running and queued work across projects with the reason for each wait, per-project usage, and stop/pause/resume
+- [x] Undo warns when other chats edited the same folder since the checkpoint, and stops anyone editing it first
+- [x] Verified in the app with 3 chats in 2 projects: the edit lock serialized the two Brewly edits, Leafy paused at its 2-turn limit while Brewly continued, and both Brewly tasks landed (tests pass, footer added)
+
+**Next**
+- Attach files and images to a message
+- Voice input
+- "Remember this" memory notes per agent that carry across chats (small, capped)
+- Signed, notarized `.dmg`
