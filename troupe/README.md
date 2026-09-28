@@ -37,6 +37,15 @@ npm run dev          # build + launch
 npm run dist:mac     # optional: unsigned .dmg/.app in release/
 ```
 
+### Troubleshooting install
+
+- **`Electron failed to install correctly`**: newer npm versions (12+) block packages' install scripts unless they're listed under `allowScripts` in `package.json`. Troupe's `package.json` allows the two it needs (`electron`, which downloads the Electron app, and `esbuild`). If you installed before that entry existed, run:
+  ```sh
+  rm -rf node_modules/electron && npm install
+  ```
+  or run the download directly with `node node_modules/electron/install.js`.
+- `electron-winstaller` is marked as denied on purpose. It's only used to build Windows installers.
+
 ## How it works
 
 - **Tabs at the top** decide who your message goes to:
