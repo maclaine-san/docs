@@ -18,8 +18,9 @@
   --name-l: 38%;
   color-scheme: light;
 }
+/* Dark palette: follows macOS unless a theme is forced (html[data-theme]). */
 @media (prefers-color-scheme: dark) {
-  :root {
+  :root:not([data-theme='light']) {
     --bg: #161618;
     --sidebar: #111113;
     --text: #ececef;
@@ -40,6 +41,27 @@
     color-scheme: dark;
   }
 }
+:root[data-theme='dark'] {
+  --bg: #161618;
+  --sidebar: #111113;
+  --text: #ececef;
+  --muted: #93939b;
+  --line: #2a2a2e;
+  --hover: rgba(255, 255, 255, 0.05);
+  --active: rgba(255, 255, 255, 0.09);
+  --bubble: #26262a;
+  --accent: #ececef;
+  --accent-text: #161618;
+  --danger: #ff6b6b;
+  --ok: #4ade80;
+  --warn-bg: #2b2412;
+  --warn-line: #5a4a1d;
+  --code: rgba(255, 255, 255, 0.07);
+  --shadow: 0 16px 50px rgba(0, 0, 0, 0.6);
+  --name-l: 70%;
+  color-scheme: dark;
+}
+:root[data-theme='light'] { color-scheme: light; }
 
 * { box-sizing: border-box; }
 html, body, #root { height: 100%; margin: 0; }
@@ -304,3 +326,11 @@ body.quick-mode { background: transparent; }
 .usage-table td a { cursor: default; text-decoration: none; }
 .usage-table .right { text-align: right; }
 .bar.thin { height: 3px; margin: 3px 0 0; max-width: 120px; }
+
+/* ---------- theme toggle */
+.side-foot { display: flex; align-items: center; gap: 4px; }
+.side-foot .side-btn { flex: 1; }
+.theme-toggle { border: none; font-size: 15px; width: 32px; height: 30px; padding: 0; border-radius: 8px; color: var(--muted); }
+.theme-seg { display: flex; border: 1px solid var(--line); border-radius: 10px; padding: 3px; gap: 3px; width: fit-content; }
+.theme-seg button { border: none; border-radius: 7px; padding: 5px 12px; }
+.theme-seg button.active { background: var(--active); font-weight: 600; }

@@ -65,6 +65,7 @@ npm run dist:mac     # optional: unsigned .dmg/.app in release/
   - The file's current contents go into that message for the agents who read it, once.
   - Agents don't need file tools for this, so it's much cheaper than letting them browse, and it works even when a project's access is set to "nobody".
   - Files are capped at 30k characters each and 60k per turn. Binary files are skipped.
+- **Light and dark mode:** the ☀︎/☾ button at the bottom of the sidebar switches instantly, and right-clicking it goes back to matching macOS. It's also in Settings → Appearance and in the ◆ menu → Appearance. The main window, the quick chat and native dialogs all follow it, and the choice is remembered.
 - **Menu-bar quick chat:**
   - Press **⌥Space** anywhere, or click the ◆ in the menu bar, for a small floating chat like Spotlight.
   - Messages go to the group (or pick an agent). **Esc** hides it and **⌘N** starts fresh. It picks up your last quick chat for 3 hours.

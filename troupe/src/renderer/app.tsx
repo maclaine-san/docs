@@ -1,6 +1,6 @@
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { createRoot } from 'react-dom/client';
-import type { ActivityView, Agent, AgentDraft, AppState, Capability, Chat, LiveStatus, Message, Project, ProjectReadAccess, TroupeApi } from '../shared/types';
+import type { ActivityView, Agent, AgentDraft, AppState, Capability, Chat, LiveStatus, Message, Project, ProjectReadAccess, Theme, TroupeApi } from '../shared/types';
 import { canEditFiles, SYSTEM_ID, USER_ID } from '../shared/types';
 import { EMOJIS, PRESETS, SUGGESTIONS } from './templates';
 
@@ -136,6 +136,7 @@ function App() {
     }
   };
 
+  useThemeAttr(state?.settings.theme);
   const chats = useMemo(() => [...(state?.chats ?? [])].sort((a, b) => b.updatedAt - a.updatedAt), [state?.chats]);
   const chat = state?.chats.find((c) => c.id === chatId);
 
@@ -291,7 +292,10 @@ function App() {
           ))}
         </nav>
         <UsageMini state={state} onClick={() => setSettingsOpen(true)} />
-        <button className="side-btn" onClick={() => setSettingsOpen(true)}>⚙ Settings</button>
+        <div className="side-foot">
+          <button className="side-btn" onClick={() => setSettingsOpen(true)}>⚙ Settings</button>
+          <ThemeToggle theme={state.settings.theme} run={run} />
+        </div>
       </aside>
 
       <main>
@@ -1160,6 +1164,43 @@ function ShortcutSetting({ value, save }: { value: string; save: (v: string) => 
   );
 }
 
+const THEMES: { value: Theme; label: string; icon: string }[] = [
+  { value: 'system', label: 'Match macOS', icon: '◐' },
+  { value: 'light', label: 'Light', icon: '☀︎' },
+  { value: 'dark', label: 'Dark', icon: '☾' },
+];
+
+/** Force light/dark on the page (or follow macOS with "system"). */
+function useThemeAttr(theme: Theme | undefined) {
+  useEffect(() => {
+    const root = document.documentElement;
+    if (theme === 'light' || theme === 'dark') root.dataset.theme = theme;
+    else delete root.dataset.theme;
+  }, [theme]);
+}
+
+/** Sidebar button: one click flips light/dark; the menu offers "Match macOS". */
+function ThemeToggle({ theme, run }: { theme: Theme; run: <T>(f: () => Promise<T>) => Promise<T | undefined> }) {
+  const [osDark, setOsDark] = useState(() => matchMedia('(prefers-color-scheme: dark)').matches);
+  useEffect(() => {
+    const mq = matchMedia('(prefers-color-scheme: dark)');
+    const on = () => setOsDark(mq.matches);
+    mq.addEventListener('change', on);
+    return () => mq.removeEventListener('change', on);
+  }, []);
+  const dark = theme === 'dark' || (theme === 'system' && osDark);
+  return (
+    <button
+      className="theme-toggle"
+      title={`${dark ? 'Dark' : 'Light'} mode${theme === 'system' ? ' (matching macOS)' : ''}. Click to switch, right-click to match macOS.`}
+      onClick={() => run(() => api.updateSettings({ theme: dark ? 'light' : 'dark' }))}
+      onContextMenu={(e) => (e.preventDefault(), run(() => api.updateSettings({ theme: 'system' })))}
+    >
+      {dark ? '☾' : '☀︎'}
+    </button>
+  );
+}
+
 function SettingsDialog({ state, close, run }: { state: AppState; close: () => void; run: <T>(f: () => Promise<T>) => Promise<T | undefined> }) {
   const s = state.settings;
   const u = state.usage;
@@ -1255,6 +1296,15 @@ function SettingsDialog({ state, close, run }: { state: AppState; close: () => v
           <input type="checkbox" checked={s.checkpoints} onChange={(e) => upd({ checkpoints: e.target.checked })} />
           <span>Save a git checkpoint before agents edit a project, so you can undo their changes in one click</span>
         </label>
+
+        <h4>Appearance</h4>
+        <div className="theme-seg">
+          {THEMES.map((t) => (
+            <button key={t.value} className={s.theme === t.value ? 'active' : ''} onClick={() => upd({ theme: t.value })}>
+              {t.icon} {t.label}
+            </button>
+          ))}
+        </div>
 
         <h4>Menu bar</h4>
         <ShortcutSetting value={s.quickShortcut} save={(v) => upd({ quickShortcut: v })} />
@@ -1373,6 +1423,7 @@ function QuickApp() {
     return () => clearTimeout(t);
   }, [toast]);
 
+  useThemeAttr(state?.settings.theme);
   const chat = state?.chats.find((c) => c.id === chatId);
   if (!state || !chat) return <div className="quick loading">◆</div>;
   const hasMessages = state.messages.some((m) => m.chatId === chat.id);

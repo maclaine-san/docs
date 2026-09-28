@@ -139,7 +139,11 @@ export interface Settings {
   notifications: boolean;
   /** Snapshot a project's git folder before agents first edit it in a chat, for one-click undo. */
   checkpoints: boolean;
+  /** Appearance: follow macOS, or force light or dark. */
+  theme: Theme;
 }
+
+export type Theme = 'system' | 'light' | 'dark';
 
 export interface UsageWindow {
   /** 0-1 fraction of the window used, as reported by Claude Code. */
